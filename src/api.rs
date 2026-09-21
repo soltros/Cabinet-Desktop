@@ -4,12 +4,7 @@ use reqwest::{
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{
-    fs::File,
-    io,
-    path::Path,
-    time::Duration,
-};
+use std::{fs::File, io, path::Path, time::Duration};
 use url::Url;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,7 +157,8 @@ struct ShareResponse {
 impl CabinetClient {
     pub fn normalize_server_url(input: &str) -> Result<String, String> {
         let candidate = input.trim().trim_end_matches('/');
-        let parsed = Url::parse(candidate).map_err(|_| "Enter a valid Cabinet server URL".to_string())?;
+        let parsed =
+            Url::parse(candidate).map_err(|_| "Enter a valid Cabinet server URL".to_string())?;
         match parsed.scheme() {
             "http" | "https" if parsed.host_str().is_some() => Ok(candidate.to_string()),
             _ => Err("Server URL must use http:// or https:// and include a hostname".to_string()),
@@ -187,7 +183,11 @@ impl CabinetClient {
             .send()
             .map_err(|e| e.to_string())?;
         let logged: LoginResponse = decode(response)?;
-        let client = Self { base_url, token: logged.token, http };
+        let client = Self {
+            base_url,
+            token: logged.token,
+            http,
+        };
         let user = client.me()?;
         Ok((client, user))
     }
@@ -215,7 +215,10 @@ impl CabinetClient {
     }
 
     pub fn me(&self) -> Result<User, String> {
-        let response = self.request(Method::GET, "/api/auth/me").send().map_err(|e| e.to_string())?;
+        let response = self
+            .request(Method::GET, "/api/auth/me")
+            .send()
+            .map_err(|e| e.to_string())?;
         Ok(decode::<MeResponse>(response)?.user)
     }
 
@@ -225,31 +228,44 @@ impl CabinetClient {
 
     pub fn list_files(&self) -> Result<Vec<CabinetFile>, String> {
         Ok(decode::<FilesResponse>(
-            self.request(Method::GET, "/api/files").send().map_err(|e| e.to_string())?
-        )?.files)
+            self.request(Method::GET, "/api/files")
+                .send()
+                .map_err(|e| e.to_string())?,
+        )?
+        .files)
     }
 
     pub fn list_folders(&self) -> Result<Vec<Folder>, String> {
         Ok(decode::<FoldersResponse>(
-            self.request(Method::GET, "/api/folders").send().map_err(|e| e.to_string())?
-        )?.folders)
+            self.request(Method::GET, "/api/folders")
+                .send()
+                .map_err(|e| e.to_string())?,
+        )?
+        .folders)
     }
 
     pub fn create_folder(&self, name: &str, parent_id: Option<&str>) -> Result<Folder, String> {
         let response = self
             .request(Method::POST, "/api/folders")
             .json(&json!({ "name": name, "parentId": parent_id }))
-            .send().map_err(|e| e.to_string())?;
+            .send()
+            .map_err(|e| e.to_string())?;
         Ok(decode::<FolderResponse>(response)?.folder)
     }
 
     #[allow(dead_code)]
     pub fn delete_folder(&self, id: &str) -> Result<(), String> {
-        unit(self.request(Method::DELETE, &format!("/api/folders/{id}")).send().map_err(|e| e.to_string())?)
+        unit(
+            self.request(Method::DELETE, &format!("/api/folders/{id}"))
+                .send()
+                .map_err(|e| e.to_string())?,
+        )
     }
 
     pub fn upload_file(&self, path: &Path, parent_id: Option<&str>) -> Result<CabinetFile, String> {
-        let name = path.file_name().and_then(|x| x.to_str())
+        let name = path
+            .file_name()
+            .and_then(|x| x.to_str())
             .ok_or_else(|| "Selected file has an invalid name".to_string())?;
         let file = File::open(path).map_err(|e| e.to_string())?;
         let part = multipart::Part::reader(file).file_name(name.to_string());
@@ -257,14 +273,22 @@ impl CabinetClient {
         if let Some(parent_id) = parent_id {
             form = form.text("parentId", parent_id.to_string());
         }
-        let response = self.request(Method::POST, "/api/files")
-            .multipart(form).send().map_err(|e| e.to_string())?;
+        let response = self
+            .request(Method::POST, "/api/files")
+            .multipart(form)
+            .send()
+            .map_err(|e| e.to_string())?;
         Ok(decode::<FileResponse>(response)?.file)
     }
 
     pub fn download_file(&self, id: &str, destination: &Path) -> Result<(), String> {
-        let response = self.request(Method::GET, &format!("/api/files/{id}/content?download=true"))
-            .send().map_err(|e| e.to_string())?;
+        let response = self
+            .request(
+                Method::GET,
+                &format!("/api/files/{id}/content?download=true"),
+            )
+            .send()
+            .map_err(|e| e.to_string())?;
         let mut response = success_response(response)?;
         let mut output = File::create(destination).map_err(|e| e.to_string())?;
         io::copy(&mut response, &mut output).map_err(|e| e.to_string())?;
@@ -272,39 +296,52 @@ impl CabinetClient {
     }
 
     pub fn rename_file(&self, id: &str, name: &str) -> Result<CabinetFile, String> {
-        let response = self.request(Method::PATCH, &format!("/api/files/{id}"))
+        let response = self
+            .request(Method::PATCH, &format!("/api/files/{id}"))
             .json(&json!({ "name": name }))
-            .send().map_err(|e| e.to_string())?;
+            .send()
+            .map_err(|e| e.to_string())?;
         Ok(decode::<FileResponse>(response)?.file)
     }
 
     #[allow(dead_code)]
     pub fn move_file(&self, id: &str, parent_id: Option<&str>) -> Result<CabinetFile, String> {
-        let response = self.request(Method::PATCH, &format!("/api/files/{id}"))
+        let response = self
+            .request(Method::PATCH, &format!("/api/files/{id}"))
             .json(&json!({ "parentId": parent_id }))
-            .send().map_err(|e| e.to_string())?;
+            .send()
+            .map_err(|e| e.to_string())?;
         Ok(decode::<FileResponse>(response)?.file)
     }
 
     pub fn delete_file(&self, id: &str) -> Result<(), String> {
-        unit(self.request(Method::DELETE, &format!("/api/files/{id}")).send().map_err(|e| e.to_string())?)
+        unit(
+            self.request(Method::DELETE, &format!("/api/files/{id}"))
+                .send()
+                .map_err(|e| e.to_string())?,
+        )
     }
 
     pub fn share_with_user(&self, id: &str, username: &str) -> Result<(), String> {
-        unit(self.request(Method::POST, &format!("/api/files/{id}/share"))
-            .json(&json!({ "username": username }))
-            .send().map_err(|e| e.to_string())?)
+        unit(
+            self.request(Method::POST, &format!("/api/files/{id}/share"))
+                .json(&json!({ "username": username }))
+                .send()
+                .map_err(|e| e.to_string())?,
+        )
     }
 
     pub fn create_public_share(&self, file_id: &str) -> Result<String, String> {
-        let response = self.request(Method::POST, "/api/shares")
+        let response = self
+            .request(Method::POST, "/api/shares")
             .json(&json!({
                 "fileId": file_id,
                 "password": Value::Null,
                 "expiresAt": Value::Null,
                 "downloadLimit": Value::Null
             }))
-            .send().map_err(|e| e.to_string())?;
+            .send()
+            .map_err(|e| e.to_string())?;
         let result: ShareResponse = decode(response)?;
         Ok(format!("{}{}", self.base_url, result.link))
     }
@@ -312,34 +349,56 @@ impl CabinetClient {
     #[allow(dead_code)]
     pub fn list_shares(&self) -> Result<Vec<Share>, String> {
         Ok(decode::<SharesResponse>(
-            self.request(Method::GET, "/api/shares").send().map_err(|e| e.to_string())?
-        )?.shares)
+            self.request(Method::GET, "/api/shares")
+                .send()
+                .map_err(|e| e.to_string())?,
+        )?
+        .shares)
     }
 
     #[allow(dead_code)]
     pub fn revoke_share(&self, id: &str) -> Result<(), String> {
-        unit(self.request(Method::DELETE, &format!("/api/shares/{id}")).send().map_err(|e| e.to_string())?)
+        unit(
+            self.request(Method::DELETE, &format!("/api/shares/{id}"))
+                .send()
+                .map_err(|e| e.to_string())?,
+        )
     }
 
     pub fn admin_stats(&self) -> Result<AdminStats, String> {
-        decode(self.request(Method::GET, "/api/admin/stats").send().map_err(|e| e.to_string())?)
+        decode(
+            self.request(Method::GET, "/api/admin/stats")
+                .send()
+                .map_err(|e| e.to_string())?,
+        )
     }
 
     pub fn admin_users(&self) -> Result<Vec<AdminUser>, String> {
         Ok(decode::<AdminUsersResponse>(
-            self.request(Method::GET, "/api/admin/users").send().map_err(|e| e.to_string())?
-        )?.users)
+            self.request(Method::GET, "/api/admin/users")
+                .send()
+                .map_err(|e| e.to_string())?,
+        )?
+        .users)
     }
 
     pub fn admin_shares(&self) -> Result<Vec<AdminShare>, String> {
         Ok(decode::<AdminSharesResponse>(
-            self.request(Method::GET, "/api/admin/shares").send().map_err(|e| e.to_string())?
-        )?.shares)
+            self.request(Method::GET, "/api/admin/shares")
+                .send()
+                .map_err(|e| e.to_string())?,
+        )?
+        .shares)
     }
 
     pub fn admin_logs(&self) -> Result<String, String> {
-        let response = self.request(Method::GET, "/api/admin/logs").send().map_err(|e| e.to_string())?;
-        success_response(response)?.text().map_err(|e| e.to_string())
+        let response = self
+            .request(Method::GET, "/api/admin/logs")
+            .send()
+            .map_err(|e| e.to_string())?;
+        success_response(response)?
+            .text()
+            .map_err(|e| e.to_string())
     }
 
     pub fn is_unauthorized(error: &str) -> bool {
@@ -350,7 +409,8 @@ impl CabinetClient {
 fn api_error(response: Response) -> String {
     let status = response.status();
     let body: Value = response.json().unwrap_or_else(|_| json!({}));
-    body.get("error").and_then(Value::as_str)
+    body.get("error")
+        .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| format!("Cabinet API returned {status}"))
 }
@@ -368,5 +428,7 @@ fn unit(response: Response) -> Result<(), String> {
 }
 
 fn decode<T: DeserializeOwned>(response: Response) -> Result<T, String> {
-    success_response(response)?.json::<T>().map_err(|e| e.to_string())
+    success_response(response)?
+        .json::<T>()
+        .map_err(|e| e.to_string())
 }
