@@ -1,5 +1,5 @@
 use crate::{
-    api::{AdminShare, AdminStats, AdminUser, CabinetClient, CabinetFile, Folder, User},
+    api::{AdminShare, AdminStats, AdminUser, CabinetClient, CabinetFile, Folder, Share, User},
     config::{self, AppConfig},
     credentials,
 };
@@ -22,6 +22,7 @@ use tray_icon::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Files,
+    Shares,
     Admin,
     Settings,
 }
@@ -46,6 +47,7 @@ enum Message {
     Refresh(Result<(Vec<CabinetFile>, Vec<Folder>, User), String>),
     Action(Result<String, String>, bool),
     ShareLink(Result<String, String>),
+    Shares(Result<Vec<Share>, String>),
     Admin(Result<(AdminStats, Vec<AdminUser>, Vec<AdminShare>, String), String>),
 }
 
@@ -67,6 +69,7 @@ pub struct CabinetApp {
     busy: usize,
     status: String,
     dialog: Option<Dialog>,
+    shares: Vec<Share>,
     admin_stats: Option<AdminStats>,
     admin_users: Vec<AdminUser>,
     admin_shares: Vec<AdminShare>,
@@ -103,6 +106,7 @@ impl CabinetApp {
             busy: 0,
             status: String::new(),
             dialog: None,
+            shares: Vec::new(),
             admin_stats: None,
             admin_users: Vec::new(),
             admin_shares: Vec::new(),
@@ -166,6 +170,17 @@ impl CabinetApp {
                     .and_then(|folders| client.me().map(|user| (files, folders, user)))
             });
             let _ = tx.send(Message::Refresh(result));
+        });
+    }
+
+    fn refresh_shares(&mut self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.busy += 1;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(Message::Shares(client.list_shares()));
         });
     }
 
@@ -251,7 +266,12 @@ impl CabinetApp {
                     Ok(url) => {
                         self.pending_clipboard = Some(url);
                         self.status = "Public link copied to clipboard".into();
+                        self.refresh_shares();
                     }
+                    Err(error) => self.handle_error(error),
+                },
+                Message::Shares(result) => match result {
+                    Ok(shares) => self.shares = shares,
                     Err(error) => self.handle_error(error),
                 },
                 Message::Admin(result) => match result {
@@ -452,6 +472,10 @@ impl CabinetApp {
                 ui.add_space(20.0);
                 if nav_button(ui, "Files", self.screen == Screen::Files).clicked() {
                     self.screen = Screen::Files;
+                }
+                if nav_button(ui, "Shares", self.screen == Screen::Shares).clicked() {
+                    self.screen = Screen::Shares;
+                    self.refresh_shares();
                 }
                 if self.user.as_ref().is_some_and(|u| u.role == "admin")
                     && nav_button(ui, "Administration", self.screen == Screen::Admin).clicked()
@@ -728,6 +752,80 @@ impl CabinetApp {
         });
     }
 
+    fn ui_shares(&mut self, root: &mut egui::Ui) {
+        egui::CentralPanel::default().show(root, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Public shares");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Refresh").clicked() {
+                        self.refresh_shares();
+                    }
+                });
+            });
+            ui.label(
+                RichText::new("Manage public links created from Cabinet.")
+                    .color(Color32::GRAY),
+            );
+            ui.add_space(16.0);
+
+            if self.shares.is_empty() {
+                ui.label("No active public shares.");
+                return;
+            }
+
+            let shares = self.shares.clone();
+            egui::Grid::new("shares-list")
+                .striped(true)
+                .min_col_width(120.0)
+                .show(ui, |ui| {
+                    ui.strong("File");
+                    ui.strong("Downloads");
+                    ui.strong("Limit");
+                    ui.strong("Expires");
+                    ui.strong("");
+                    ui.end_row();
+
+                    for share in shares {
+                        ui.label(
+                            share
+                                .file_name
+                                .as_deref()
+                                .unwrap_or(&share.file_id),
+                        );
+                        ui.label(share.downloads.to_string());
+                        ui.label(
+                            share
+                                .download_limit
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "∞".to_string()),
+                        );
+                        ui.label(
+                            share
+                                .expires_at
+                                .as_deref()
+                                .unwrap_or("Never"),
+                        );
+                        if ui.button("Revoke").clicked() {
+                            let id = share.id.clone();
+                            let tx = self.tx.clone();
+                            let Some(client) = self.client.clone() else {
+                                continue;
+                            };
+                            self.busy += 1;
+                            thread::spawn(move || {
+                                let result = client
+                                    .revoke_share(&id)
+                                    .map(|_| "Share revoked".to_string());
+                                let _ = tx.send(Message::Action(result, false));
+                                let _ = tx.send(Message::Shares(client.list_shares()));
+                            });
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+
     fn ui_settings(&mut self, root: &mut egui::Ui) {
         egui::CentralPanel::default().show(root, |ui| {
             ui.heading("Settings");
@@ -870,6 +968,7 @@ impl eframe::App for CabinetApp {
 
         match self.screen {
             Screen::Files => self.ui_files(root),
+            Screen::Shares => self.ui_shares(root),
             Screen::Admin => self.ui_admin(root),
             Screen::Settings => self.ui_settings(root),
         }
