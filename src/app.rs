@@ -34,10 +34,21 @@ enum ViewMode {
 }
 
 enum Dialog {
-    CreateFolder { name: String },
-    Rename { id: String, value: String },
-    Move { id: String, target: Option<String> },
-    ShareUser { id: String, username: String },
+    CreateFolder {
+        name: String,
+    },
+    Rename {
+        id: String,
+        value: String,
+    },
+    Move {
+        id: String,
+        target: Option<String>,
+    },
+    ShareUser {
+        id: String,
+        username: String,
+    },
     AdminCreateUser {
         username: String,
         password: String,
@@ -797,7 +808,9 @@ impl CabinetApp {
                     if ui.button("Scrub database").clicked() {
                         self.run_action(RefreshAfter::Admin, move |client| {
                             let removed = client.admin_scrub()?;
-                            Ok(format!("Database scrub complete: {removed} missing file record(s) removed"))
+                            Ok(format!(
+                                "Database scrub complete: {removed} missing file record(s) removed"
+                            ))
                         });
                     }
                     if ui.button("Create user").clicked() {
@@ -904,8 +917,7 @@ impl CabinetApp {
                 });
             });
             ui.label(
-                RichText::new("Manage public links created from Cabinet.")
-                    .color(Color32::GRAY),
+                RichText::new("Manage public links created from Cabinet.").color(Color32::GRAY),
             );
             ui.add_space(16.0);
 
@@ -927,12 +939,7 @@ impl CabinetApp {
                     ui.end_row();
 
                     for share in shares {
-                        ui.label(
-                            share
-                                .file_name
-                                .as_deref()
-                                .unwrap_or(&share.file_id),
-                        );
+                        ui.label(share.file_name.as_deref().unwrap_or(&share.file_id));
                         ui.label(share.downloads.to_string());
                         ui.label(
                             share
@@ -940,12 +947,7 @@ impl CabinetApp {
                                 .map(|value| value.to_string())
                                 .unwrap_or_else(|| "∞".to_string()),
                         );
-                        ui.label(
-                            share
-                                .expires_at
-                                .as_deref()
-                                .unwrap_or("Never"),
-                        );
+                        ui.label(share.expires_at.as_deref().unwrap_or("Never"));
                         if ui.button("Revoke").clicked() {
                             let id = share.id.clone();
                             self.run_action(RefreshAfter::Shares, move |client| {
@@ -1087,7 +1089,10 @@ impl CabinetApp {
 
                         let username = username.trim().to_string();
                         let password = password.clone();
-                        let quota = quota_gb.trim().parse::<f64>().ok()
+                        let quota = quota_gb
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
                             .map(|value| (value * 1024_f64.powi(3)) as i64);
 
                         let create_clicked = ui.button("Create").clicked();
@@ -1121,17 +1126,16 @@ impl CabinetApp {
                         } else {
                             Some(password.clone())
                         };
-                        let quota = quota_gb.trim().parse::<f64>().ok()
+                        let quota = quota_gb
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
                             .map(|value| (value * 1024_f64.powi(3)) as i64);
 
                         if ui.button("Save").clicked() && quota.is_some() {
                             action = Some(Box::new(move |app| {
                                 app.run_action(RefreshAfter::Admin, move |client| {
-                                    client.admin_update_user(
-                                        &id,
-                                        password.as_deref(),
-                                        quota,
-                                    )?;
+                                    client.admin_update_user(&id, password.as_deref(), quota)?;
                                     Ok("User updated".into())
                                 });
                             }));

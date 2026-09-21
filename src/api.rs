@@ -403,7 +403,12 @@ impl CabinetClient {
         .shares)
     }
 
-    pub fn admin_create_user(&self, username: &str, password: &str, quota: i64) -> Result<(), String> {
+    pub fn admin_create_user(
+        &self,
+        username: &str,
+        password: &str,
+        quota: i64,
+    ) -> Result<(), String> {
         unit(
             self.request(Method::POST, "/api/admin/users")
                 .json(&json!({ "username": username, "password": password, "quota": quota }))
