@@ -1,6 +1,6 @@
 use reqwest::{
     blocking::{multipart, Client, RequestBuilder, Response},
-    Method,
+    Method, StatusCode,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
