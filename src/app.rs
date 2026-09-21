@@ -341,7 +341,8 @@ impl CabinetApp {
         }).cloned().collect()
     }
 
-    fn ui_login(&mut self, root: &mut egui::Ui) {PLACEHOLDER_CENTRAL
+    fn ui_login(&mut self, root: &mut egui::Ui) {
+        egui::CentralPanel::default().show(root, |ui| {
             ui.with_layout(Layout::top_down_justified(Align::Center), |ui| {
                 ui.add_space(90.0);
                 ui.heading(RichText::new("Cabinet").size(34.0).strong().color(Color32::from_rgb(37, 99, 235)));
@@ -418,6 +419,10 @@ impl CabinetApp {
             });
         });
 
+        if self.selected().is_some() {
+            self.ui_details(root);
+        }
+
         egui::CentralPanel::default().show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
@@ -467,11 +472,6 @@ impl CabinetApp {
                 });
             }
         });
-
-        if self.selected().is_some() {
-            self.ui_details(ctx);
-        }
-        self.ui_dialog(ctx);
     }
 
     fn ui_details(&mut self, root: &mut egui::Ui) {
@@ -511,7 +511,7 @@ impl CabinetApp {
     }
 
     fn ui_admin(&mut self, root: &mut egui::Ui) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Administration");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -637,50 +637,61 @@ impl CabinetApp {
 }
 
 impl eframe::App for CabinetApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_messages();
+
         if let Some(text) = self.pending_clipboard.take() {
             ctx.copy_text(text);
         }
-        ctx.request_repaint_after(Duration::from_millis(120));
 
         if self.quit_requested.swap(false, Ordering::SeqCst) {
             self.allow_quit = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_quit {
+        if ctx.input(|input| input.viewport().close_requested()) && !self.allow_quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
 
+        ctx.request_repaint_after(Duration::from_millis(120));
+    }
+
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if self.client.is_none() {
-            self.ui_login(ctx);
+            self.ui_login(root);
             return;
         }
 
-        self.ui_sidebar(ctx);
-        match self.screen {
-            Screen::Files => self.ui_files(ctx),
-            Screen::Admin => self.ui_admin(ctx),
-            Screen::Settings => self.ui_settings(ctx),
-        }
+        self.ui_sidebar(root);
 
         if self.busy > 0 {
-            egui::TopBottomPanel::bottom("status").exact_height(26.0).show(ctx, |ui| {
+            egui::Panel::bottom("status").exact_size(26.0).show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(if self.status.is_empty() { "Working…" } else { &self.status });
+                    ui.label(if self.status.is_empty() {
+                        "Working…"
+                    } else {
+                        &self.status
+                    });
                 });
             });
         } else if !self.status.is_empty() {
-            egui::TopBottomPanel::bottom("status").exact_height(26.0).show(ctx, |ui| {
+            egui::Panel::bottom("status").exact_size(26.0).show(root, |ui| {
                 ui.label(&self.status);
             });
         }
+
+        match self.screen {
+            Screen::Files => self.ui_files(root),
+            Screen::Admin => self.ui_admin(root),
+            Screen::Settings => self.ui_settings(root),
+        }
+
+        let ctx = root.ctx().clone();
+        self.ui_dialog(&ctx);
     }
 }
-
 fn setup_tray(ctx: &egui::Context, quit_requested: Arc<AtomicBool>) -> Option<TrayIcon> {
     let menu = Menu::new();
     let show = MenuItem::with_id("show", "Show Cabinet", true, None);
@@ -689,7 +700,7 @@ fn setup_tray(ctx: &egui::Context, quit_requested: Arc<AtomicBool>) -> Option<Tr
     let _ = menu.append(&quit);
 
     let ctx_menu = ctx.clone();
-    MenuEvent::set_event_handler(Some(move |event| {
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         match event.id().as_ref() {
             "show" => {
                 ctx_menu.send_viewport_cmd(egui::ViewportCommand::Visible(true));
