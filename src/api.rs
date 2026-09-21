@@ -44,7 +44,6 @@ pub struct Folder {
     pub created_at: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Share {
@@ -133,7 +132,6 @@ struct FileResponse {
     file: CabinetFile,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct SharesResponse {
     shares: Vec<Share>,
@@ -346,7 +344,6 @@ impl CabinetClient {
         Ok(format!("{}{}", self.base_url, result.link))
     }
 
-    #[allow(dead_code)]
     pub fn list_shares(&self) -> Result<Vec<Share>, String> {
         Ok(decode::<SharesResponse>(
             self.request(Method::GET, "/api/shares")
@@ -356,7 +353,6 @@ impl CabinetClient {
         .shares)
     }
 
-    #[allow(dead_code)]
     pub fn revoke_share(&self, id: &str) -> Result<(), String> {
         unit(
             self.request(Method::DELETE, &format!("/api/shares/{id}"))
