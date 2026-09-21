@@ -278,6 +278,24 @@ impl CabinetClient {
         Ok(decode::<FileResponse>(response)?.file)
     }
 
+    pub fn thumbnail(&self, id: &str) -> Result<Option<Vec<u8>>, String> {
+        let response = self
+            .request(Method::GET, &format!("/api/files/{id}/thumbnail"))
+            .send()
+            .map_err(|e| e.to_string())?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        Ok(Some(
+            success_response(response)?
+                .bytes()
+                .map_err(|e| e.to_string())?
+                .to_vec(),
+        ))
+    }
+
     pub fn download_file(&self, id: &str, destination: &Path) -> Result<(), String> {
         let response = self
             .request(
