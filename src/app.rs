@@ -1032,20 +1032,18 @@ impl CabinetApp {
                         let quota = quota_gb.trim().parse::<f64>().ok()
                             .map(|value| (value * 1024_f64.powi(3)) as i64);
 
-                        if ui.button("Create").clicked()
-                            && !username.is_empty()
-                            && password.len() >= 12
-                            && quota.is_some()
-                        {
-                            let quota = quota.unwrap();
-                            action = Some(Box::new(move |app| {
-                                app.run_action(false, move |client| {
-                                    client.admin_create_user(&username, &password, quota)?;
-                                    Ok("User created".into())
-                                });
-                                app.refresh_admin();
-                            }));
-                            close = true;
+                        let create_clicked = ui.button("Create").clicked();
+                        if create_clicked && !username.is_empty() && password.len() >= 12 {
+                            if let Some(quota) = quota {
+                                action = Some(Box::new(move |app| {
+                                    app.run_action(false, move |client| {
+                                        client.admin_create_user(&username, &password, quota)?;
+                                        Ok("User created".into())
+                                    });
+                                    app.refresh_admin();
+                                }));
+                                close = true;
+                            }
                         }
                     }
                     Dialog::AdminEditUser {
@@ -1070,7 +1068,6 @@ impl CabinetApp {
                             .map(|value| (value * 1024_f64.powi(3)) as i64);
 
                         if ui.button("Save").clicked() && quota.is_some() {
-                            let quota = quota;
                             action = Some(Box::new(move |app| {
                                 app.run_action(false, move |client| {
                                     client.admin_update_user(
