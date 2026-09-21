@@ -569,6 +569,19 @@ impl CabinetApp {
                             name: String::new(),
                         });
                     }
+                    if let Some(folder_id) = self.current_folder.clone() {
+                        if ui.button("Delete folder").clicked() {
+                            let parent = self
+                                .folder_map()
+                                .get(folder_id.as_str())
+                                .and_then(|folder| folder.parent_id.clone());
+                            self.run_action(true, move |client| {
+                                client.delete_folder(&folder_id)?;
+                                Ok("Folder deleted".into())
+                            });
+                            self.current_folder = parent;
+                        }
+                    }
                 });
             });
             ui.add_space(18.0);
@@ -649,6 +662,12 @@ impl CabinetApp {
                     self.dialog = Some(Dialog::Rename {
                         id: file.id.clone(),
                         value: file.name.clone(),
+                    });
+                }
+                if ui.button("Move").clicked() {
+                    self.dialog = Some(Dialog::Move {
+                        id: file.id.clone(),
+                        target: file.parent_id.clone(),
                     });
                 }
                 if ui.button("Copy public link").clicked() {
@@ -850,6 +869,7 @@ impl CabinetApp {
             egui::Window::new(match dialog {
                 Dialog::CreateFolder { .. } => "New folder",
                 Dialog::Rename { .. } => "Rename file",
+                Dialog::Move { .. } => "Move file",
                 Dialog::ShareUser { .. } => "Share with user",
             })
             .collapsible(false)
@@ -881,6 +901,42 @@ impl CabinetApp {
                                 app.run_action(true, move |client| {
                                     client.rename_file(&id, &value)?;
                                     Ok("File renamed".into())
+                                });
+                            }));
+                            close = true;
+                        }
+                    }
+                    Dialog::Move { id, target } => {
+                        ui.label("Destination folder");
+                        egui::ComboBox::from_id_salt("move-target")
+                            .selected_text(
+                                target
+                                    .as_deref()
+                                    .and_then(|id| {
+                                        self.folders
+                                            .iter()
+                                            .find(|folder| folder.id == id)
+                                            .map(|folder| folder.name.as_str())
+                                    })
+                                    .unwrap_or("Files"),
+                            )
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(target, None, "Files");
+                                for folder in &self.folders {
+                                    ui.selectable_value(
+                                        target,
+                                        Some(folder.id.clone()),
+                                        &folder.name,
+                                    );
+                                }
+                            });
+                        let id = id.clone();
+                        let target = target.clone();
+                        if ui.button("Move").clicked() {
+                            action = Some(Box::new(move |app| {
+                                app.run_action(true, move |client| {
+                                    client.move_file(&id, target.as_deref())?;
+                                    Ok("File moved".into())
                                 });
                             }));
                             close = true;
