@@ -830,6 +830,28 @@ impl CabinetApp {
                     if ui.button("Refresh").clicked() {
                         self.refresh_admin();
                     }
+                    if ui.button("Save logs").clicked() {
+                        if let Some(destination) = rfd::FileDialog::new()
+                            .set_file_name("cabinet.log")
+                            .save_file()
+                        {
+                            self.run_action(RefreshAfter::None, move |client| {
+                                client.admin_download_logs(&destination)?;
+                                Ok("Server logs saved".into())
+                            });
+                        }
+                    }
+                    if ui.button("Backup").clicked() {
+                        if let Some(destination) = rfd::FileDialog::new()
+                            .set_file_name("cabinet-backup.json")
+                            .save_file()
+                        {
+                            self.run_action(RefreshAfter::None, move |client| {
+                                client.admin_backup(&destination)?;
+                                Ok("Cabinet metadata backup saved".into())
+                            });
+                        }
+                    }
                     if ui.button("Scrub database").clicked() {
                         self.run_action(RefreshAfter::Admin, move |client| {
                             let removed = client.admin_scrub()?;
