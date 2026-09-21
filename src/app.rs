@@ -713,6 +713,20 @@ impl CabinetApp {
                     if ui.button("Refresh").clicked() {
                         self.refresh_admin();
                     }
+                    if ui.button("Scrub database").clicked() {
+                        self.run_action(false, move |client| {
+                            let removed = client.admin_scrub()?;
+                            Ok(format!("Database scrub complete: {removed} missing file record(s) removed"))
+                        });
+                        self.refresh_admin();
+                    }
+                    if ui.button("Create user").clicked() {
+                        self.dialog = Some(Dialog::AdminCreateUser {
+                            username: String::new(),
+                            password: String::new(),
+                            quota_gb: "50".into(),
+                        });
+                    }
                 });
             });
             ui.label(
@@ -729,12 +743,14 @@ impl CabinetApp {
             }
             ui.add_space(18.0);
             ui.heading("Users");
+            let admin_users = self.admin_users.clone();
             egui::Grid::new("admin-users").striped(true).show(ui, |ui| {
                 ui.strong("Username");
                 ui.strong("Role");
                 ui.strong("Storage");
+                ui.strong("");
                 ui.end_row();
-                for user in &self.admin_users {
+                for user in admin_users {
                     ui.label(&user.username);
                     ui.label(&user.role);
                     ui.label(format!(
@@ -742,22 +758,50 @@ impl CabinetApp {
                         format_bytes(user.used_space),
                         format_bytes(user.quota)
                     ));
+                    ui.horizontal(|ui| {
+                        if ui.button("Edit").clicked() {
+                            self.dialog = Some(Dialog::AdminEditUser {
+                                id: user.id.clone(),
+                                username: user.username.clone(),
+                                password: String::new(),
+                                quota_gb: format!("{:.1}", user.quota as f64 / 1024_f64.powi(3)),
+                            });
+                        }
+                        if user.role != "admin" && ui.button("Delete").clicked() {
+                            let id = user.id.clone();
+                            self.run_action(false, move |client| {
+                                client.admin_delete_user(&id)?;
+                                Ok("User deleted".into())
+                            });
+                            self.refresh_admin();
+                        }
+                    });
                     ui.end_row();
                 }
             });
             ui.add_space(18.0);
             ui.heading("Public shares");
+            let admin_shares = self.admin_shares.clone();
             egui::Grid::new("admin-shares")
                 .striped(true)
                 .show(ui, |ui| {
                     ui.strong("File");
                     ui.strong("Creator");
                     ui.strong("Downloads");
+                    ui.strong("");
                     ui.end_row();
-                    for share in &self.admin_shares {
+                    for share in admin_shares {
                         ui.label(share.file_name.as_deref().unwrap_or(&share.file_id));
                         ui.label(share.creator_name.as_deref().unwrap_or(&share.creator_id));
                         ui.label(share.downloads.to_string());
+                        if ui.button("Revoke").clicked() {
+                            let id = share.id.clone();
+                            self.run_action(false, move |client| {
+                                client.admin_revoke_share(&id)?;
+                                Ok("Share revoked".into())
+                            });
+                            self.refresh_admin();
+                        }
                         ui.end_row();
                     }
                 });
@@ -871,6 +915,8 @@ impl CabinetApp {
                 Dialog::Rename { .. } => "Rename file",
                 Dialog::Move { .. } => "Move file",
                 Dialog::ShareUser { .. } => "Share with user",
+                Dialog::AdminCreateUser { .. } => "Create user",
+                Dialog::AdminEditUser { .. } => "Edit user",
             })
             .collapsible(false)
             .resizable(false)
@@ -953,6 +999,76 @@ impl CabinetApp {
                                     client.share_with_user(&id, &username)?;
                                     Ok("File shared".into())
                                 });
+                            }));
+                            close = true;
+                        }
+                    }
+                    Dialog::AdminCreateUser {
+                        username,
+                        password,
+                        quota_gb,
+                    } => {
+                        ui.label("Username");
+                        ui.text_edit_singleline(username);
+                        ui.label("Password");
+                        ui.add(egui::TextEdit::singleline(password).password(true));
+                        ui.label("Quota (GiB)");
+                        ui.text_edit_singleline(quota_gb);
+
+                        let username = username.trim().to_string();
+                        let password = password.clone();
+                        let quota = quota_gb.trim().parse::<f64>().ok()
+                            .map(|value| (value * 1024_f64.powi(3)) as i64);
+
+                        if ui.button("Create").clicked()
+                            && !username.is_empty()
+                            && password.len() >= 12
+                            && quota.is_some()
+                        {
+                            let quota = quota.unwrap();
+                            action = Some(Box::new(move |app| {
+                                app.run_action(false, move |client| {
+                                    client.admin_create_user(&username, &password, quota)?;
+                                    Ok("User created".into())
+                                });
+                                app.refresh_admin();
+                            }));
+                            close = true;
+                        }
+                    }
+                    Dialog::AdminEditUser {
+                        id,
+                        username,
+                        password,
+                        quota_gb,
+                    } => {
+                        ui.label(format!("User: {username}"));
+                        ui.label("New password (leave blank to keep current)");
+                        ui.add(egui::TextEdit::singleline(password).password(true));
+                        ui.label("Quota (GiB)");
+                        ui.text_edit_singleline(quota_gb);
+
+                        let id = id.clone();
+                        let password = if password.trim().is_empty() {
+                            None
+                        } else {
+                            Some(password.clone())
+                        };
+                        let quota = quota_gb.trim().parse::<f64>().ok()
+                            .map(|value| (value * 1024_f64.powi(3)) as i64);
+
+                        if ui.button("Save").clicked() && quota.is_some() {
+                            let quota = quota;
+                            action = Some(Box::new(move |app| {
+                                app.run_action(false, move |client| {
+                                    client.admin_update_user(
+                                        &id,
+                                        password.as_deref(),
+                                        quota,
+                                    )?;
+                                    Ok("User updated".into())
+                                });
+                                app.refresh_admin();
                             }));
                             close = true;
                         }
