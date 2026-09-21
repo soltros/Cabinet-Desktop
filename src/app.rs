@@ -6,7 +6,6 @@ use crate::{
 use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke, Vec2};
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
@@ -342,8 +341,7 @@ impl CabinetApp {
         }).cloned().collect()
     }
 
-    fn ui_login(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn ui_login(&mut self, root: &mut egui::Ui) {PLACEHOLDER_CENTRAL
             ui.with_layout(Layout::top_down_justified(Align::Center), |ui| {
                 ui.add_space(90.0);
                 ui.heading(RichText::new("Cabinet").size(34.0).strong().color(Color32::from_rgb(37, 99, 235)));
@@ -373,8 +371,8 @@ impl CabinetApp {
         });
     }
 
-    fn ui_sidebar(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("sidebar").exact_width(210.0).show(ctx, |ui| {
+    fn ui_sidebar(&mut self, root: &mut egui::Ui) {
+        egui::Panel::left("sidebar").exact_size(210.0).show(root, |ui| {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("▣").size(24.0).color(Color32::from_rgb(37, 99, 235)));
@@ -402,8 +400,8 @@ impl CabinetApp {
         });
     }
 
-    fn ui_files(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("toolbar").exact_height(62.0).show(ctx, |ui| {
+    fn ui_files(&mut self, root: &mut egui::Ui) {
+        egui::Panel::top("toolbar").exact_size(62.0).show(root, |ui| {
             ui.horizontal_centered(|ui| {
                 if ui.button("Files").clicked() { self.current_folder = None; }
                 for crumb in self.breadcrumbs() {
@@ -420,7 +418,7 @@ impl CabinetApp {
             });
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.heading("Your files");
@@ -476,9 +474,9 @@ impl CabinetApp {
         self.ui_dialog(ctx);
     }
 
-    fn ui_details(&mut self, ctx: &egui::Context) {
+    fn ui_details(&mut self, root: &mut egui::Ui) {
         let Some(file) = self.selected().cloned() else { return; };
-        egui::SidePanel::right("details").exact_width(300.0).show(ctx, |ui| {
+        egui::Panel::right("details").exact_size(300.0).show(root, |ui| {
             ui.add_space(14.0);
             ui.heading(&file.name);
             ui.label(RichText::new(format!("{} · {}", format_bytes(file.size), file.mime_type.as_deref().unwrap_or("File"))).color(Color32::GRAY));
@@ -512,7 +510,7 @@ impl CabinetApp {
         });
     }
 
-    fn ui_admin(&mut self, ctx: &egui::Context) {
+    fn ui_admin(&mut self, root: &mut egui::Ui) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Administration");
@@ -557,7 +555,7 @@ impl CabinetApp {
         });
     }
 
-    fn ui_settings(&mut self, ctx: &egui::Context) {
+    fn ui_settings(&mut self, root: &mut egui::Ui) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Settings");
             ui.add_space(16.0);
