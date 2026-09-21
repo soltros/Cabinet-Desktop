@@ -36,7 +36,19 @@ enum ViewMode {
 enum Dialog {
     CreateFolder { name: String },
     Rename { id: String, value: String },
+    Move { id: String, target: Option<String> },
     ShareUser { id: String, username: String },
+    AdminCreateUser {
+        username: String,
+        password: String,
+        quota_gb: String,
+    },
+    AdminEditUser {
+        id: String,
+        username: String,
+        password: String,
+        quota_gb: String,
+    },
 }
 
 type DialogAction = Box<dyn FnOnce(&mut CabinetApp)>;
