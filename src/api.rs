@@ -467,6 +467,28 @@ impl CabinetClient {
         Ok(decode::<ScrubResponse>(response)?.removed_count)
     }
 
+    pub fn admin_backup(&self, destination: &Path) -> Result<(), String> {
+        let response = self
+            .request(Method::GET, "/api/admin/backup/db")
+            .send()
+            .map_err(|e| e.to_string())?;
+        let mut response = success_response(response)?;
+        let mut output = File::create(destination).map_err(|e| e.to_string())?;
+        io::copy(&mut response, &mut output).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn admin_download_logs(&self, destination: &Path) -> Result<(), String> {
+        let response = self
+            .request(Method::GET, "/api/admin/logs?download=true")
+            .send()
+            .map_err(|e| e.to_string())?;
+        let mut response = success_response(response)?;
+        let mut output = File::create(destination).map_err(|e| e.to_string())?;
+        io::copy(&mut response, &mut output).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn admin_logs(&self) -> Result<String, String> {
         let response = self
             .request(Method::GET, "/api/admin/logs")
