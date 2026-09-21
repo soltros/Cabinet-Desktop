@@ -1,0 +1,23 @@
+pkgname=cabinet-desktop
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Native Rust desktop client for the Cabinet self-hosted file locker'
+arch=('x86_64')
+url='https://github.com/soltros/Cabinet-Desktop'
+license=('GPL-3.0-only')
+depends=('gtk3' 'libayatana-appindicator' 'libxdo')
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "Cabinet-Desktop-$pkgver"
+  cargo build --release --locked
+}
+
+package() {
+  cd "Cabinet-Desktop-$pkgver"
+  install -Dm755 target/release/cabinet-desktop "$pkgdir/usr/bin/cabinet-desktop"
+  install -Dm644 packaging/cabinet-desktop.desktop "$pkgdir/usr/share/applications/cabinet-desktop.desktop"
+  install -Dm644 packaging/cabinet-desktop.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/cabinet-desktop.svg"
+}
