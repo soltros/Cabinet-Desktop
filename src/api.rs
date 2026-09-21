@@ -49,6 +49,7 @@ pub struct Folder {
     pub created_at: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Share {
@@ -137,6 +138,7 @@ struct FileResponse {
     file: CabinetFile,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct SharesResponse {
     shares: Vec<Share>,
@@ -241,6 +243,7 @@ impl CabinetClient {
         Ok(decode::<FolderResponse>(response)?.folder)
     }
 
+    #[allow(dead_code)]
     pub fn delete_folder(&self, id: &str) -> Result<(), String> {
         unit(self.request(Method::DELETE, &format!("/api/folders/{id}")).send().map_err(|e| e.to_string())?)
     }
@@ -275,6 +278,7 @@ impl CabinetClient {
         Ok(decode::<FileResponse>(response)?.file)
     }
 
+    #[allow(dead_code)]
     pub fn move_file(&self, id: &str, parent_id: Option<&str>) -> Result<CabinetFile, String> {
         let response = self.request(Method::PATCH, &format!("/api/files/{id}"))
             .json(&json!({ "parentId": parent_id }))
@@ -305,12 +309,14 @@ impl CabinetClient {
         Ok(format!("{}{}", self.base_url, result.link))
     }
 
+    #[allow(dead_code)]
     pub fn list_shares(&self) -> Result<Vec<Share>, String> {
         Ok(decode::<SharesResponse>(
             self.request(Method::GET, "/api/shares").send().map_err(|e| e.to_string())?
         )?.shares)
     }
 
+    #[allow(dead_code)]
     pub fn revoke_share(&self, id: &str) -> Result<(), String> {
         unit(self.request(Method::DELETE, &format!("/api/shares/{id}")).send().map_err(|e| e.to_string())?)
     }
