@@ -23,6 +23,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cabinet-desktop-${{ runner.os }}
+
       - name: Generate Cargo.lock
         if: runner.os == 'Linux'
         run: cargo generate-lockfile
