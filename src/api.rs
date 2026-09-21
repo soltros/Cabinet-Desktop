@@ -1,11 +1,47 @@
 use reqwest::{
     blocking::{multipart, Client, RequestBuilder, Response},
-    Method,
+    Method, StatusCode,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{fs::File, io, path::Path, time::Duration};
+use std::{
+    fs::File,
+    io::{self, Read, Write},
+    path::Path,
+    time::Duration,
+};
 use url::Url;
+
+struct ProgressReader<R, F> {
+    inner: R,
+    transferred: u64,
+    total: u64,
+    callback: F,
+}
+
+impl<R, F> ProgressReader<R, F> {
+    fn new(inner: R, total: u64, callback: F) -> Self {
+        Self {
+            inner,
+            transferred: 0,
+            total,
+            callback,
+        }
+    }
+}
+
+impl<R, F> Read for ProgressReader<R, F>
+where
+    R: Read,
+    F: FnMut(u64, u64),
+{
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        self.transferred = self.transferred.saturating_add(read as u64);
+        (self.callback)(self.transferred, self.total);
+        Ok(read)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,7 +80,6 @@ pub struct Folder {
     pub created_at: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Share {
@@ -133,7 +168,6 @@ struct FileResponse {
     file: CabinetFile,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct SharesResponse {
     shares: Vec<Share>,
@@ -253,7 +287,6 @@ impl CabinetClient {
         Ok(decode::<FolderResponse>(response)?.folder)
     }
 
-    #[allow(dead_code)]
     pub fn delete_folder(&self, id: &str) -> Result<(), String> {
         unit(
             self.request(Method::DELETE, &format!("/api/folders/{id}"))
@@ -262,13 +295,23 @@ impl CabinetClient {
         )
     }
 
-    pub fn upload_file(&self, path: &Path, parent_id: Option<&str>) -> Result<CabinetFile, String> {
+    pub fn upload_file_with_progress<F>(
+        &self,
+        path: &Path,
+        parent_id: Option<&str>,
+        progress: F,
+    ) -> Result<CabinetFile, String>
+    where
+        F: FnMut(u64, u64) + Send + 'static,
+    {
         let name = path
             .file_name()
             .and_then(|x| x.to_str())
             .ok_or_else(|| "Selected file has an invalid name".to_string())?;
         let file = File::open(path).map_err(|e| e.to_string())?;
-        let part = multipart::Part::reader(file).file_name(name.to_string());
+        let total = file.metadata().map_err(|e| e.to_string())?.len();
+        let reader = ProgressReader::new(file, total, progress);
+        let part = multipart::Part::reader_with_length(reader, total).file_name(name.to_string());
         let mut form = multipart::Form::new().part("file", part);
         if let Some(parent_id) = parent_id {
             form = form.text("parentId", parent_id.to_string());
@@ -281,7 +324,15 @@ impl CabinetClient {
         Ok(decode::<FileResponse>(response)?.file)
     }
 
-    pub fn download_file(&self, id: &str, destination: &Path) -> Result<(), String> {
+    pub fn download_file_with_progress<F>(
+        &self,
+        id: &str,
+        destination: &Path,
+        mut progress: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(u64, u64),
+    {
         let response = self
             .request(
                 Method::GET,
@@ -290,8 +341,24 @@ impl CabinetClient {
             .send()
             .map_err(|e| e.to_string())?;
         let mut response = success_response(response)?;
+        let total = response.content_length().unwrap_or(0);
         let mut output = File::create(destination).map_err(|e| e.to_string())?;
-        io::copy(&mut response, &mut output).map_err(|e| e.to_string())?;
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut transferred = 0_u64;
+
+        loop {
+            let read = response.read(&mut buffer).map_err(|e| e.to_string())?;
+            if read == 0 {
+                break;
+            }
+            output
+                .write_all(&buffer[..read])
+                .map_err(|e| e.to_string())?;
+            transferred = transferred.saturating_add(read as u64);
+            progress(transferred, total);
+        }
+
+        output.flush().map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -304,7 +371,6 @@ impl CabinetClient {
         Ok(decode::<FileResponse>(response)?.file)
     }
 
-    #[allow(dead_code)]
     pub fn move_file(&self, id: &str, parent_id: Option<&str>) -> Result<CabinetFile, String> {
         let response = self
             .request(Method::PATCH, &format!("/api/files/{id}"))
@@ -331,14 +397,20 @@ impl CabinetClient {
         )
     }
 
-    pub fn create_public_share(&self, file_id: &str) -> Result<String, String> {
+    pub fn create_public_share(
+        &self,
+        file_id: &str,
+        password: Option<&str>,
+        expires_at: Option<&str>,
+        download_limit: Option<i64>,
+    ) -> Result<String, String> {
         let response = self
             .request(Method::POST, "/api/shares")
             .json(&json!({
                 "fileId": file_id,
-                "password": Value::Null,
-                "expiresAt": Value::Null,
-                "downloadLimit": Value::Null
+                "password": password,
+                "expiresAt": expires_at,
+                "downloadLimit": download_limit
             }))
             .send()
             .map_err(|e| e.to_string())?;
@@ -346,7 +418,6 @@ impl CabinetClient {
         Ok(format!("{}{}", self.base_url, result.link))
     }
 
-    #[allow(dead_code)]
     pub fn list_shares(&self) -> Result<Vec<Share>, String> {
         Ok(decode::<SharesResponse>(
             self.request(Method::GET, "/api/shares")
@@ -356,7 +427,6 @@ impl CabinetClient {
         .shares)
     }
 
-    #[allow(dead_code)]
     pub fn revoke_share(&self, id: &str) -> Result<(), String> {
         unit(
             self.request(Method::DELETE, &format!("/api/shares/{id}"))
@@ -389,6 +459,86 @@ impl CabinetClient {
                 .map_err(|e| e.to_string())?,
         )?
         .shares)
+    }
+
+    pub fn admin_create_user(
+        &self,
+        username: &str,
+        password: &str,
+        quota: i64,
+    ) -> Result<(), String> {
+        unit(
+            self.request(Method::POST, "/api/admin/users")
+                .json(&json!({ "username": username, "password": password, "quota": quota }))
+                .send()
+                .map_err(|e| e.to_string())?,
+        )
+    }
+
+    pub fn admin_update_user(
+        &self,
+        id: &str,
+        password: Option<&str>,
+        quota: Option<i64>,
+    ) -> Result<(), String> {
+        unit(
+            self.request(Method::PATCH, &format!("/api/admin/users/{id}"))
+                .json(&json!({ "password": password, "quota": quota }))
+                .send()
+                .map_err(|e| e.to_string())?,
+        )
+    }
+
+    pub fn admin_delete_user(&self, id: &str) -> Result<(), String> {
+        unit(
+            self.request(Method::DELETE, &format!("/api/admin/users/{id}"))
+                .send()
+                .map_err(|e| e.to_string())?,
+        )
+    }
+
+    pub fn admin_revoke_share(&self, id: &str) -> Result<(), String> {
+        unit(
+            self.request(Method::DELETE, &format!("/api/admin/shares/{id}"))
+                .send()
+                .map_err(|e| e.to_string())?,
+        )
+    }
+
+    pub fn admin_scrub(&self) -> Result<i64, String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ScrubResponse {
+            removed_count: i64,
+        }
+
+        let response = self
+            .request(Method::POST, "/api/admin/scrub")
+            .send()
+            .map_err(|e| e.to_string())?;
+        Ok(decode::<ScrubResponse>(response)?.removed_count)
+    }
+
+    pub fn admin_backup(&self, destination: &Path) -> Result<(), String> {
+        let response = self
+            .request(Method::GET, "/api/admin/backup/db")
+            .send()
+            .map_err(|e| e.to_string())?;
+        let mut response = success_response(response)?;
+        let mut output = File::create(destination).map_err(|e| e.to_string())?;
+        io::copy(&mut response, &mut output).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn admin_download_logs(&self, destination: &Path) -> Result<(), String> {
+        let response = self
+            .request(Method::GET, "/api/admin/logs?download=true")
+            .send()
+            .map_err(|e| e.to_string())?;
+        let mut response = success_response(response)?;
+        let mut output = File::create(destination).map_err(|e| e.to_string())?;
+        io::copy(&mut response, &mut output).map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn admin_logs(&self) -> Result<String, String> {

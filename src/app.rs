@@ -1,5 +1,5 @@
 use crate::{
-    api::{AdminShare, AdminStats, AdminUser, CabinetClient, CabinetFile, Folder, User},
+    api::{AdminShare, AdminStats, AdminUser, CabinetClient, CabinetFile, Folder, Share, User},
     config::{self, AppConfig},
     credentials,
 };
@@ -22,6 +22,7 @@ use tray_icon::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Files,
+    Shares,
     Admin,
     Settings,
 }
@@ -33,19 +34,90 @@ enum ViewMode {
 }
 
 enum Dialog {
-    CreateFolder { name: String },
-    Rename { id: String, value: String },
-    ShareUser { id: String, username: String },
+    CreateFolder {
+        name: String,
+    },
+    Rename {
+        id: String,
+        value: String,
+    },
+    Move {
+        id: String,
+        target: Option<String>,
+    },
+    ShareUser {
+        id: String,
+        username: String,
+    },
+    PublicShare {
+        id: String,
+        password: String,
+        expires_hours: String,
+        download_limit: String,
+    },
+    AdminCreateUser {
+        username: String,
+        password: String,
+        quota_gb: String,
+    },
+    AdminEditUser {
+        id: String,
+        username: String,
+        password: String,
+        quota_gb: String,
+    },
 }
 
 type DialogAction = Box<dyn FnOnce(&mut CabinetApp)>;
+
+#[derive(Clone, Copy)]
+enum RefreshAfter {
+    None,
+    Files,
+    Shares,
+    Admin,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransferKind {
+    Upload,
+    Download,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransferStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+struct TransferState {
+    id: u64,
+    name: String,
+    kind: TransferKind,
+    status: TransferStatus,
+    transferred: u64,
+    total: u64,
+}
 
 enum Message {
     Restore(Result<(CabinetClient, User), String>),
     Login(Result<(CabinetClient, User), String>),
     Refresh(Result<(Vec<CabinetFile>, Vec<Folder>, User), String>),
-    Action(Result<String, String>, bool),
+    Action(Result<String, String>, RefreshAfter),
     ShareLink(Result<String, String>),
+    Shares(Result<Vec<Share>, String>),
+    Thumbnail(String, Result<Option<Vec<u8>>, String>),
+    TransferProgress {
+        id: u64,
+        transferred: u64,
+        total: u64,
+    },
+    TransferFinished {
+        id: u64,
+        result: Result<String, String>,
+        refresh: RefreshAfter,
+    },
     Admin(Result<(AdminStats, Vec<AdminUser>, Vec<AdminShare>, String), String>),
 }
 
@@ -67,6 +139,11 @@ pub struct CabinetApp {
     busy: usize,
     status: String,
     dialog: Option<Dialog>,
+    shares: Vec<Share>,
+    thumbnails: HashMap<String, egui::TextureHandle>,
+    thumbnail_pending: HashSet<String>,
+    transfers: Vec<TransferState>,
+    next_transfer_id: u64,
     admin_stats: Option<AdminStats>,
     admin_users: Vec<AdminUser>,
     admin_shares: Vec<AdminShare>,
@@ -103,6 +180,11 @@ impl CabinetApp {
             busy: 0,
             status: String::new(),
             dialog: None,
+            shares: Vec::new(),
+            thumbnails: HashMap::new(),
+            thumbnail_pending: HashSet::new(),
+            transfers: Vec::new(),
+            next_transfer_id: 1,
             admin_stats: None,
             admin_users: Vec::new(),
             admin_shares: Vec::new(),
@@ -169,6 +251,55 @@ impl CabinetApp {
         });
     }
 
+    fn create_public_share(
+        &mut self,
+        id: String,
+        password: Option<String>,
+        expires_at: Option<String>,
+        download_limit: Option<i64>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.busy += 1;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = client.create_public_share(
+                &id,
+                password.as_deref(),
+                expires_at.as_deref(),
+                download_limit,
+            );
+            let _ = tx.send(Message::ShareLink(result));
+        });
+    }
+
+    fn refresh_shares(&mut self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.busy += 1;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(Message::Shares(client.list_shares()));
+        });
+    }
+
+    fn load_thumbnail(&mut self, id: String) {
+        if self.thumbnails.contains_key(&id) || !self.thumbnail_pending.insert(id.clone()) {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            self.thumbnail_pending.remove(&id);
+            return;
+        };
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = client.thumbnail(&id);
+            let _ = tx.send(Message::Thumbnail(id, result));
+        });
+    }
+
     fn refresh_admin(&mut self) {
         let Some(client) = self.client.clone() else {
             return;
@@ -187,7 +318,7 @@ impl CabinetApp {
         });
     }
 
-    fn run_action<F>(&mut self, refresh: bool, f: F)
+    fn run_action<F>(&mut self, refresh: RefreshAfter, f: F)
     where
         F: FnOnce(CabinetClient) -> Result<String, String> + Send + 'static,
     {
@@ -202,9 +333,14 @@ impl CabinetApp {
         });
     }
 
-    fn process_messages(&mut self) {
+    fn process_messages(&mut self, ctx: &egui::Context) {
         while let Ok(message) = self.rx.try_recv() {
-            self.busy = self.busy.saturating_sub(1);
+            if !matches!(
+                message,
+                Message::Thumbnail(_, _) | Message::TransferProgress { .. }
+            ) {
+                self.busy = self.busy.saturating_sub(1);
+            }
             match message {
                 Message::Restore(result) | Message::Login(result) => match result {
                     Ok((client, user)) => {
@@ -231,6 +367,10 @@ impl CabinetApp {
                 },
                 Message::Refresh(result) => match result {
                     Ok((files, folders, user)) => {
+                        let live_ids: HashSet<String> =
+                            files.iter().map(|file| file.id.clone()).collect();
+                        self.thumbnails.retain(|id, _| live_ids.contains(id));
+                        self.thumbnail_pending.retain(|id| live_ids.contains(id));
                         self.files = files;
                         self.folders = folders;
                         self.user = Some(user);
@@ -241,8 +381,11 @@ impl CabinetApp {
                 Message::Action(result, refresh) => match result {
                     Ok(message) => {
                         self.status = message;
-                        if refresh {
-                            self.refresh();
+                        match refresh {
+                            RefreshAfter::None => {}
+                            RefreshAfter::Files => self.refresh(),
+                            RefreshAfter::Shares => self.refresh_shares(),
+                            RefreshAfter::Admin => self.refresh_admin(),
                         }
                     }
                     Err(error) => self.handle_error(error),
@@ -251,9 +394,79 @@ impl CabinetApp {
                     Ok(url) => {
                         self.pending_clipboard = Some(url);
                         self.status = "Public link copied to clipboard".into();
+                        self.refresh_shares();
                     }
                     Err(error) => self.handle_error(error),
                 },
+                Message::Shares(result) => match result {
+                    Ok(shares) => self.shares = shares,
+                    Err(error) => self.handle_error(error),
+                },
+                Message::Thumbnail(id, result) => {
+                    self.thumbnail_pending.remove(&id);
+                    if let Ok(Some(bytes)) = result {
+                        if let Ok(decoded) = image::load_from_memory(&bytes) {
+                            let rgba = decoded.to_rgba8();
+                            let size = [rgba.width() as usize, rgba.height() as usize];
+                            let color =
+                                egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                            let texture = ctx.load_texture(
+                                format!("cabinet-thumbnail-{id}"),
+                                color,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            self.thumbnails.insert(id, texture);
+                        }
+                    }
+                }
+                Message::TransferProgress {
+                    id,
+                    transferred,
+                    total,
+                } => {
+                    if let Some(transfer) =
+                        self.transfers.iter_mut().find(|transfer| transfer.id == id)
+                    {
+                        transfer.transferred = transferred;
+                        transfer.total = total;
+                    }
+                }
+                Message::TransferFinished {
+                    id,
+                    result,
+                    refresh,
+                } => {
+                    if let Some(transfer) =
+                        self.transfers.iter_mut().find(|transfer| transfer.id == id)
+                    {
+                        transfer.status = if result.is_ok() {
+                            TransferStatus::Completed
+                        } else {
+                            TransferStatus::Failed
+                        };
+                        if transfer.total > 0 && result.is_ok() {
+                            transfer.transferred = transfer.total;
+                        }
+                    }
+
+                    match result {
+                        Ok(message) => {
+                            self.status = message;
+                            let batch_done = !self.transfers.iter().any(|transfer| {
+                                transfer.kind == TransferKind::Upload
+                                    && transfer.status == TransferStatus::Running
+                            });
+                            match refresh {
+                                RefreshAfter::Files if batch_done => self.refresh(),
+                                RefreshAfter::Files => {}
+                                RefreshAfter::Shares => self.refresh_shares(),
+                                RefreshAfter::Admin => self.refresh_admin(),
+                                RefreshAfter::None => {}
+                            }
+                        }
+                        Err(error) => self.handle_error(error),
+                    }
+                }
                 Message::Admin(result) => match result {
                     Ok((stats, users, shares, logs)) => {
                         self.admin_stats = Some(stats);
@@ -296,18 +509,56 @@ impl CabinetApp {
         let Some(paths) = files else {
             return;
         };
+        let Some(client) = self.client.clone() else {
+            return;
+        };
         let parent = self.current_folder.clone();
-        self.run_action(true, move |client| {
-            let count = paths.len();
-            for path in paths {
-                client.upload_file(&path, parent.as_deref())?;
-            }
-            Ok(if count == 1 {
-                "Upload complete".into()
-            } else {
-                format!("{count} files uploaded")
-            })
-        });
+
+        for path in paths {
+            let id = self.next_transfer_id;
+            self.next_transfer_id = self.next_transfer_id.saturating_add(1);
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("Upload")
+                .to_string();
+
+            self.transfers.push(TransferState {
+                id,
+                name: name.clone(),
+                kind: TransferKind::Upload,
+                status: TransferStatus::Running,
+                transferred: 0,
+                total: std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
+            });
+            self.busy += 1;
+
+            let tx = self.tx.clone();
+            let progress_tx = tx.clone();
+            let client = client.clone();
+            let parent = parent.clone();
+            thread::spawn(move || {
+                let result = client
+                    .upload_file_with_progress(
+                        &path,
+                        parent.as_deref(),
+                        move |transferred, total| {
+                            let _ = progress_tx.send(Message::TransferProgress {
+                                id,
+                                transferred,
+                                total,
+                            });
+                        },
+                    )
+                    .map(|file| format!("Uploaded {}", file.name));
+
+                let _ = tx.send(Message::TransferFinished {
+                    id,
+                    result,
+                    refresh: RefreshAfter::Files,
+                });
+            });
+        }
     }
 
     fn download_selected(&mut self) {
@@ -318,9 +569,46 @@ impl CabinetApp {
         let Some(destination) = destination else {
             return;
         };
-        self.run_action(false, move |client| {
-            client.download_file(&file.id, &destination)?;
-            Ok(format!("Downloaded {}", file.name))
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+
+        let id = self.next_transfer_id;
+        self.next_transfer_id = self.next_transfer_id.saturating_add(1);
+        self.transfers.push(TransferState {
+            id,
+            name: file.name.clone(),
+            kind: TransferKind::Download,
+            status: TransferStatus::Running,
+            transferred: 0,
+            total: file.size.max(0) as u64,
+        });
+        self.busy += 1;
+
+        let tx = self.tx.clone();
+        let progress_tx = tx.clone();
+        let file_id = file.id.clone();
+        let file_name = file.name.clone();
+        thread::spawn(move || {
+            let result = client
+                .download_file_with_progress(
+                    &file_id,
+                    &destination,
+                    move |transferred, total| {
+                        let _ = progress_tx.send(Message::TransferProgress {
+                            id,
+                            transferred,
+                            total,
+                        });
+                    },
+                )
+                .map(|_| format!("Downloaded {file_name}"));
+
+            let _ = tx.send(Message::TransferFinished {
+                id,
+                result,
+                refresh: RefreshAfter::None,
+            });
         });
     }
 
@@ -453,6 +741,10 @@ impl CabinetApp {
                 if nav_button(ui, "Files", self.screen == Screen::Files).clicked() {
                     self.screen = Screen::Files;
                 }
+                if nav_button(ui, "Shares", self.screen == Screen::Shares).clicked() {
+                    self.screen = Screen::Shares;
+                    self.refresh_shares();
+                }
                 if self.user.as_ref().is_some_and(|u| u.role == "admin")
                     && nav_button(ui, "Administration", self.screen == Screen::Admin).clicked()
                 {
@@ -545,6 +837,19 @@ impl CabinetApp {
                             name: String::new(),
                         });
                     }
+                    if let Some(folder_id) = self.current_folder.clone() {
+                        if ui.button("Delete folder").clicked() {
+                            let parent = self
+                                .folder_map()
+                                .get(folder_id.as_str())
+                                .and_then(|folder| folder.parent_id.clone());
+                            self.run_action(RefreshAfter::Files, move |client| {
+                                client.delete_folder(&folder_id)?;
+                                Ok("Folder deleted".into())
+                            });
+                            self.current_folder = parent;
+                        }
+                    }
                 });
             });
             ui.add_space(18.0);
@@ -584,13 +889,28 @@ impl CabinetApp {
             } else {
                 ui.horizontal_wrapped(|ui| {
                     for folder in folders {
-                        if card(ui, "📁", &folder.name, "Folder", false).clicked() {
+                        if card(ui, "📁", &folder.name, "Folder", false, None).clicked() {
                             self.current_folder = Some(folder.id);
                         }
                     }
                     for file in files {
                         let selected = self.selected_file.as_deref() == Some(file.id.as_str());
-                        if card(ui, "📄", &file.name, &format_bytes(file.size), selected).clicked()
+                        if file.thumbnail.is_some()
+                            && !self.thumbnails.contains_key(&file.id)
+                            && !self.thumbnail_pending.contains(&file.id)
+                        {
+                            self.load_thumbnail(file.id.clone());
+                        }
+                        let texture = self.thumbnails.get(&file.id);
+                        if card(
+                            ui,
+                            "📄",
+                            &file.name,
+                            &format_bytes(file.size),
+                            selected,
+                            texture,
+                        )
+                        .clicked()
                         {
                             self.selected_file = Some(file.id.clone());
                         }
@@ -627,16 +947,18 @@ impl CabinetApp {
                         value: file.name.clone(),
                     });
                 }
-                if ui.button("Copy public link").clicked() {
-                    let tx = self.tx.clone();
-                    let Some(client) = self.client.clone() else {
-                        return;
-                    };
-                    let id = file.id.clone();
-                    self.busy += 1;
-                    thread::spawn(move || {
-                        let result = client.create_public_share(&id);
-                        let _ = tx.send(Message::ShareLink(result));
+                if ui.button("Move").clicked() {
+                    self.dialog = Some(Dialog::Move {
+                        id: file.id.clone(),
+                        target: file.parent_id.clone(),
+                    });
+                }
+                if ui.button("Create public link").clicked() {
+                    self.dialog = Some(Dialog::PublicShare {
+                        id: file.id.clone(),
+                        password: String::new(),
+                        expires_hours: String::new(),
+                        download_limit: String::new(),
                     });
                 }
                 if ui.button("Share with Cabinet user").clicked() {
@@ -654,7 +976,7 @@ impl CabinetApp {
                 {
                     let id = file.id.clone();
                     self.selected_file = None;
-                    self.run_action(true, move |client| {
+                    self.run_action(RefreshAfter::Files, move |client| {
                         client.delete_file(&id)?;
                         Ok("File deleted".into())
                     });
@@ -669,6 +991,43 @@ impl CabinetApp {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("Refresh").clicked() {
                         self.refresh_admin();
+                    }
+                    if ui.button("Save logs").clicked() {
+                        if let Some(destination) = rfd::FileDialog::new()
+                            .set_file_name("cabinet.log")
+                            .save_file()
+                        {
+                            self.run_action(RefreshAfter::None, move |client| {
+                                client.admin_download_logs(&destination)?;
+                                Ok("Server logs saved".into())
+                            });
+                        }
+                    }
+                    if ui.button("Backup").clicked() {
+                        if let Some(destination) = rfd::FileDialog::new()
+                            .set_file_name("cabinet-backup.json")
+                            .save_file()
+                        {
+                            self.run_action(RefreshAfter::None, move |client| {
+                                client.admin_backup(&destination)?;
+                                Ok("Cabinet metadata backup saved".into())
+                            });
+                        }
+                    }
+                    if ui.button("Scrub database").clicked() {
+                        self.run_action(RefreshAfter::Admin, move |client| {
+                            let removed = client.admin_scrub()?;
+                            Ok(format!(
+                                "Database scrub complete: {removed} missing file record(s) removed"
+                            ))
+                        });
+                    }
+                    if ui.button("Create user").clicked() {
+                        self.dialog = Some(Dialog::AdminCreateUser {
+                            username: String::new(),
+                            password: String::new(),
+                            quota_gb: "50".into(),
+                        });
                     }
                 });
             });
@@ -686,12 +1045,14 @@ impl CabinetApp {
             }
             ui.add_space(18.0);
             ui.heading("Users");
+            let admin_users = self.admin_users.clone();
             egui::Grid::new("admin-users").striped(true).show(ui, |ui| {
                 ui.strong("Username");
                 ui.strong("Role");
                 ui.strong("Storage");
+                ui.strong("");
                 ui.end_row();
-                for user in &self.admin_users {
+                for user in admin_users {
                     ui.label(&user.username);
                     ui.label(&user.role);
                     ui.label(format!(
@@ -699,22 +1060,48 @@ impl CabinetApp {
                         format_bytes(user.used_space),
                         format_bytes(user.quota)
                     ));
+                    ui.horizontal(|ui| {
+                        if ui.button("Edit").clicked() {
+                            self.dialog = Some(Dialog::AdminEditUser {
+                                id: user.id.clone(),
+                                username: user.username.clone(),
+                                password: String::new(),
+                                quota_gb: format!("{:.1}", user.quota as f64 / 1024_f64.powi(3)),
+                            });
+                        }
+                        if user.role != "admin" && ui.button("Delete").clicked() {
+                            let id = user.id.clone();
+                            self.run_action(RefreshAfter::Admin, move |client| {
+                                client.admin_delete_user(&id)?;
+                                Ok("User deleted".into())
+                            });
+                        }
+                    });
                     ui.end_row();
                 }
             });
             ui.add_space(18.0);
             ui.heading("Public shares");
+            let admin_shares = self.admin_shares.clone();
             egui::Grid::new("admin-shares")
                 .striped(true)
                 .show(ui, |ui| {
                     ui.strong("File");
                     ui.strong("Creator");
                     ui.strong("Downloads");
+                    ui.strong("");
                     ui.end_row();
-                    for share in &self.admin_shares {
+                    for share in admin_shares {
                         ui.label(share.file_name.as_deref().unwrap_or(&share.file_id));
                         ui.label(share.creator_name.as_deref().unwrap_or(&share.creator_id));
                         ui.label(share.downloads.to_string());
+                        if ui.button("Revoke").clicked() {
+                            let id = share.id.clone();
+                            self.run_action(RefreshAfter::Admin, move |client| {
+                                client.admin_revoke_share(&id)?;
+                                Ok("Share revoked".into())
+                            });
+                        }
                         ui.end_row();
                     }
                 });
@@ -726,6 +1113,126 @@ impl CabinetApp {
                     ui.monospace(&self.admin_logs);
                 });
         });
+    }
+
+    fn ui_shares(&mut self, root: &mut egui::Ui) {
+        egui::CentralPanel::default().show(root, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Public shares");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Refresh").clicked() {
+                        self.refresh_shares();
+                    }
+                });
+            });
+            ui.label(
+                RichText::new("Manage public links created from Cabinet.").color(Color32::GRAY),
+            );
+            ui.add_space(16.0);
+
+            if self.shares.is_empty() {
+                ui.label("No active public shares.");
+                return;
+            }
+
+            let shares = self.shares.clone();
+            egui::Grid::new("shares-list")
+                .striped(true)
+                .min_col_width(120.0)
+                .show(ui, |ui| {
+                    ui.strong("File");
+                    ui.strong("Downloads");
+                    ui.strong("Limit");
+                    ui.strong("Expires");
+                    ui.strong("");
+                    ui.end_row();
+
+                    for share in shares {
+                        ui.label(share.file_name.as_deref().unwrap_or(&share.file_id));
+                        ui.label(share.downloads.to_string());
+                        ui.label(
+                            share
+                                .download_limit
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "∞".to_string()),
+                        );
+                        ui.label(share.expires_at.as_deref().unwrap_or("Never"));
+                        if ui.button("Revoke").clicked() {
+                            let id = share.id.clone();
+                            self.run_action(RefreshAfter::Shares, move |client| {
+                                client.revoke_share(&id)?;
+                                Ok("Share revoked".to_string())
+                            });
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+
+    fn ui_transfers(&mut self, root: &mut egui::Ui) {
+        if self.transfers.is_empty() {
+            return;
+        }
+
+        let visible_count = self.transfers.len().min(4);
+        let height = 42.0 + visible_count as f32 * 44.0;
+        let mut clear_completed = false;
+
+        egui::Panel::bottom("transfers")
+            .exact_size(height)
+            .show(root, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("Transfers");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Clear completed").clicked() {
+                            clear_completed = true;
+                        }
+                    });
+                });
+
+                for transfer in self.transfers.iter().rev().take(4).rev() {
+                    let fraction = if transfer.total > 0 {
+                        (transfer.transferred as f32 / transfer.total as f32).clamp(0.0, 1.0)
+                    } else if transfer.status == TransferStatus::Completed {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    let verb = match transfer.kind {
+                        TransferKind::Upload => "Upload",
+                        TransferKind::Download => "Download",
+                    };
+                    let suffix = match transfer.status {
+                        TransferStatus::Running => {
+                            format!(
+                                "{} / {}",
+                                format_bytes(transfer.transferred as i64),
+                                if transfer.total > 0 {
+                                    format_bytes(transfer.total as i64)
+                                } else {
+                                    "Unknown".into()
+                                }
+                            )
+                        }
+                        TransferStatus::Completed => "Complete".into(),
+                        TransferStatus::Failed => "Failed".into(),
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{verb}: {}", truncate(&transfer.name, 34)));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(RichText::new(suffix).small().color(Color32::GRAY));
+                        });
+                    });
+                    ui.add(egui::ProgressBar::new(fraction).desired_width(f32::INFINITY));
+                }
+            });
+
+        if clear_completed {
+            self.transfers
+                .retain(|transfer| transfer.status == TransferStatus::Running);
+        }
     }
 
     fn ui_settings(&mut self, root: &mut egui::Ui) {
@@ -752,7 +1259,11 @@ impl CabinetApp {
             egui::Window::new(match dialog {
                 Dialog::CreateFolder { .. } => "New folder",
                 Dialog::Rename { .. } => "Rename file",
+                Dialog::Move { .. } => "Move file",
                 Dialog::ShareUser { .. } => "Share with user",
+                Dialog::PublicShare { .. } => "Create public link",
+                Dialog::AdminCreateUser { .. } => "Create user",
+                Dialog::AdminEditUser { .. } => "Edit user",
             })
             .collapsible(false)
             .resizable(false)
@@ -765,7 +1276,7 @@ impl CabinetApp {
                         if ui.button("Create").clicked() && !value.is_empty() {
                             action = Some(Box::new(move |app| {
                                 let parent = app.current_folder.clone();
-                                app.run_action(true, move |client| {
+                                app.run_action(RefreshAfter::Files, move |client| {
                                     client.create_folder(&value, parent.as_deref())?;
                                     Ok("Folder created".into())
                                 });
@@ -780,9 +1291,45 @@ impl CabinetApp {
                         let value = value.trim().to_string();
                         if ui.button("Rename").clicked() && !value.is_empty() {
                             action = Some(Box::new(move |app| {
-                                app.run_action(true, move |client| {
+                                app.run_action(RefreshAfter::Files, move |client| {
                                     client.rename_file(&id, &value)?;
                                     Ok("File renamed".into())
+                                });
+                            }));
+                            close = true;
+                        }
+                    }
+                    Dialog::Move { id, target } => {
+                        ui.label("Destination folder");
+                        egui::ComboBox::from_id_salt("move-target")
+                            .selected_text(
+                                target
+                                    .as_deref()
+                                    .and_then(|id| {
+                                        self.folders
+                                            .iter()
+                                            .find(|folder| folder.id == id)
+                                            .map(|folder| folder.name.as_str())
+                                    })
+                                    .unwrap_or("Files"),
+                            )
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(target, None, "Files");
+                                for folder in &self.folders {
+                                    ui.selectable_value(
+                                        target,
+                                        Some(folder.id.clone()),
+                                        &folder.name,
+                                    );
+                                }
+                            });
+                        let id = id.clone();
+                        let target = target.clone();
+                        if ui.button("Move").clicked() {
+                            action = Some(Box::new(move |app| {
+                                app.run_action(RefreshAfter::Files, move |client| {
+                                    client.move_file(&id, target.as_deref())?;
+                                    Ok("File moved".into())
                                 });
                             }));
                             close = true;
@@ -795,9 +1342,156 @@ impl CabinetApp {
                         let username = username.trim().to_string();
                         if ui.button("Share").clicked() && !username.is_empty() {
                             action = Some(Box::new(move |app| {
-                                app.run_action(false, move |client| {
+                                app.run_action(RefreshAfter::None, move |client| {
                                     client.share_with_user(&id, &username)?;
                                     Ok("File shared".into())
+                                });
+                            }));
+                            close = true;
+                        }
+                    }
+                    Dialog::PublicShare {
+                        id,
+                        password,
+                        expires_hours,
+                        download_limit,
+                    } => {
+                        ui.label("Password (optional)");
+                        ui.add(egui::TextEdit::singleline(password).password(true));
+
+                        ui.label("Expires in hours (optional)");
+                        ui.text_edit_singleline(expires_hours);
+
+                        ui.label("Download limit (optional)");
+                        ui.text_edit_singleline(download_limit);
+
+                        let expires_hours_value = if expires_hours.trim().is_empty() {
+                            None
+                        } else {
+                            expires_hours
+                                .trim()
+                                .parse::<i64>()
+                                .ok()
+                                .filter(|value| *value > 0)
+                        };
+                        let expires_valid =
+                            expires_hours.trim().is_empty() || expires_hours_value.is_some();
+
+                        let download_limit_value = if download_limit.trim().is_empty() {
+                            None
+                        } else {
+                            download_limit
+                                .trim()
+                                .parse::<i64>()
+                                .ok()
+                                .filter(|value| *value > 0)
+                        };
+                        let download_limit_valid =
+                            download_limit.trim().is_empty() || download_limit_value.is_some();
+
+                        if !expires_valid {
+                            ui.label(
+                                RichText::new("Expiration must be a positive number of hours.")
+                                    .color(Color32::from_rgb(190, 55, 55)),
+                            );
+                        }
+                        if !download_limit_valid {
+                            ui.label(
+                                RichText::new("Download limit must be a positive integer.")
+                                    .color(Color32::from_rgb(190, 55, 55)),
+                            );
+                        }
+
+                        let id = id.clone();
+                        let password = if password.is_empty() {
+                            None
+                        } else {
+                            Some(password.clone())
+                        };
+                        let expires_at = expires_hours_value.map(|hours| {
+                            (chrono::Utc::now() + chrono::Duration::hours(hours)).to_rfc3339()
+                        });
+
+                        if ui
+                            .add_enabled(
+                                expires_valid && download_limit_valid,
+                                egui::Button::new("Create and copy link"),
+                            )
+                            .clicked()
+                        {
+                            action = Some(Box::new(move |app| {
+                                app.create_public_share(
+                                    id,
+                                    password,
+                                    expires_at,
+                                    download_limit_value,
+                                );
+                            }));
+                            close = true;
+                        }
+                    }
+                    Dialog::AdminCreateUser {
+                        username,
+                        password,
+                        quota_gb,
+                    } => {
+                        ui.label("Username");
+                        ui.text_edit_singleline(username);
+                        ui.label("Password");
+                        ui.add(egui::TextEdit::singleline(password).password(true));
+                        ui.label("Quota (GiB)");
+                        ui.text_edit_singleline(quota_gb);
+
+                        let username = username.trim().to_string();
+                        let password = password.clone();
+                        let quota = quota_gb
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                            .map(|value| (value * 1024_f64.powi(3)) as i64);
+
+                        let create_clicked = ui.button("Create").clicked();
+                        if create_clicked && !username.is_empty() && password.len() >= 12 {
+                            if let Some(quota) = quota {
+                                action = Some(Box::new(move |app| {
+                                    app.run_action(RefreshAfter::Admin, move |client| {
+                                        client.admin_create_user(&username, &password, quota)?;
+                                        Ok("User created".into())
+                                    });
+                                }));
+                                close = true;
+                            }
+                        }
+                    }
+                    Dialog::AdminEditUser {
+                        id,
+                        username,
+                        password,
+                        quota_gb,
+                    } => {
+                        ui.label(format!("User: {username}"));
+                        ui.label("New password (leave blank to keep current)");
+                        ui.add(egui::TextEdit::singleline(password).password(true));
+                        ui.label("Quota (GiB)");
+                        ui.text_edit_singleline(quota_gb);
+
+                        let id = id.clone();
+                        let password = if password.trim().is_empty() {
+                            None
+                        } else {
+                            Some(password.clone())
+                        };
+                        let quota = quota_gb
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                            .map(|value| (value * 1024_f64.powi(3)) as i64);
+
+                        if ui.button("Save").clicked() && quota.is_some() {
+                            action = Some(Box::new(move |app| {
+                                app.run_action(RefreshAfter::Admin, move |client| {
+                                    client.admin_update_user(&id, password.as_deref(), quota)?;
+                                    Ok("User updated".into())
                                 });
                             }));
                             close = true;
@@ -820,7 +1514,7 @@ impl CabinetApp {
 
 impl eframe::App for CabinetApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.process_messages();
+        self.process_messages(ctx);
 
         if let Some(text) = self.pending_clipboard.take() {
             ctx.copy_text(text);
@@ -846,6 +1540,7 @@ impl eframe::App for CabinetApp {
         }
 
         self.ui_sidebar(root);
+        self.ui_transfers(root);
 
         if self.busy > 0 {
             egui::Panel::bottom("status")
@@ -870,6 +1565,7 @@ impl eframe::App for CabinetApp {
 
         match self.screen {
             Screen::Files => self.ui_files(root),
+            Screen::Shares => self.ui_shares(root),
             Screen::Admin => self.ui_admin(root),
             Screen::Settings => self.ui_settings(root),
         }
@@ -947,7 +1643,14 @@ fn nav_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
     ui.add_sized([180.0, 36.0], egui::Button::new(label).selected(active))
 }
 
-fn card(ui: &mut egui::Ui, icon: &str, name: &str, meta: &str, selected: bool) -> egui::Response {
+fn card(
+    ui: &mut egui::Ui,
+    icon: &str,
+    name: &str,
+    meta: &str,
+    selected: bool,
+    texture: Option<&egui::TextureHandle>,
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(165.0, 190.0), Sense::click());
     let fill = if selected {
         Color32::from_rgb(232, 241, 255)
@@ -961,13 +1664,26 @@ fn card(ui: &mut egui::Ui, icon: &str, name: &str, meta: &str, selected: bool) -
         Stroke::new(1.0, Color32::from_rgb(224, 229, 238)),
         egui::StrokeKind::Inside,
     );
-    ui.painter().text(
-        rect.center_top() + Vec2::new(0.0, 48.0),
-        egui::Align2::CENTER_CENTER,
-        icon,
-        egui::FontId::proportional(42.0),
-        Color32::from_rgb(92, 132, 190),
+    let preview_rect = egui::Rect::from_min_max(
+        rect.min + Vec2::new(8.0, 8.0),
+        egui::pos2(rect.max.x - 8.0, rect.min.y + 120.0),
     );
+    if let Some(texture) = texture {
+        ui.painter().image(
+            texture.id(),
+            preview_rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    } else {
+        ui.painter().text(
+            rect.center_top() + Vec2::new(0.0, 48.0),
+            egui::Align2::CENTER_CENTER,
+            icon,
+            egui::FontId::proportional(42.0),
+            Color32::from_rgb(92, 132, 190),
+        );
+    }
     let title = truncate(name, 22);
     ui.painter().text(
         rect.left_bottom() + Vec2::new(12.0, -38.0),

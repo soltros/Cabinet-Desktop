@@ -3,6 +3,10 @@ name: Rust checks
 permissions:
   contents: write
 
+concurrency:
+  group: rust-checks-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: [main, "feat/**", "fix/**"]
@@ -22,6 +26,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cabinet-desktop-${{ runner.os }}
 
       - name: Generate Cargo.lock
         if: runner.os == 'Linux'

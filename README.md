@@ -50,7 +50,7 @@ The Cabinet API token is stored separately in the operating system credential st
 
 - file listing
 - folder listing
-- grid view
+- grid view with API-backed thumbnails
 - list view
 - search
 - multi-file upload
@@ -69,10 +69,10 @@ When the authenticated Cabinet account has the `admin` role, Cabinet Desktop exp
 
 - global server statistics
 - user listing
-- public-share listing
+- create, edit, and delete users
+- public-share listing and revocation
+- database scrub
 - server logs
-
-Additional admin actions will be added as the interface reaches full parity with the Cabinet web application.
 
 ## Connecting to Cabinet
 
@@ -145,25 +145,28 @@ The `soltros_nixpkgs` update scanner compares that pin with the latest commit on
 
 ## Distribution targets
 
-Planned release packaging includes:
+Tagged releases are configured to build:
 
 ### Linux
 
-- DEB
-- RPM
-- AppImage
-- AUR
+- DEB via cargo-packager
+- RPM via cargo-generate-rpm
+- AppImage via cargo-packager
+- Pacman package via cargo-packager
+- AUR PKGBUILD
 - Nix / NixOS through `soltros_nixpkgs`
 
 ### Windows
 
-- MSI
+- MSI via WiX
 - NSIS installer
 
 ### macOS
 
 - application bundle
 - DMG
+
+Pushing a `v*` tag runs the cross-platform packaging matrix and collects the generated installers into a draft GitHub release.
 
 ## Development branch
 
