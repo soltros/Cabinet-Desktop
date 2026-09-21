@@ -260,9 +260,9 @@ impl CabinetClient {
     }
 
     pub fn download_file(&self, id: &str, destination: &Path) -> Result<(), String> {
-        let mut response = self.request(Method::GET, &format!("/api/files/{id}/content?download=true"))
+        let response = self.request(Method::GET, &format!("/api/files/{id}/content?download=true"))
             .send().map_err(|e| e.to_string())?;
-        ensure_success(&mut response)?;
+        let mut response = success_response(response)?;
         let mut output = File::create(destination).map_err(|e| e.to_string())?;
         io::copy(&mut response, &mut output).map_err(|e| e.to_string())?;
         Ok(())
@@ -332,9 +332,8 @@ impl CabinetClient {
     }
 
     pub fn admin_logs(&self) -> Result<String, String> {
-        let mut response = self.request(Method::GET, "/api/admin/logs").send().map_err(|e| e.to_string())?;
-        ensure_success(&mut response)?;
-        response.text().map_err(|e| e.to_string())
+        let response = self.request(Method::GET, "/api/admin/logs").send().map_err(|e| e.to_string())?;
+        success_response(response)?.text().map_err(|e| e.to_string())
     }
 
     pub fn is_unauthorized(error: &str) -> bool {
@@ -342,22 +341,26 @@ impl CabinetClient {
     }
 }
 
-fn ensure_success(response: &mut Response) -> Result<(), String> {
-    if response.status().is_success() {
-        return Ok(());
-    }
+fn api_error(response: Response) -> String {
     let status = response.status();
     let body: Value = response.json().unwrap_or_else(|_| json!({}));
-    Err(body.get("error").and_then(Value::as_str)
+    body.get("error").and_then(Value::as_str)
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("Cabinet API returned {status}")))
+        .unwrap_or_else(|| format!("Cabinet API returned {status}"))
 }
 
-fn unit(mut response: Response) -> Result<(), String> {
-    ensure_success(&mut response)
+fn success_response(response: Response) -> Result<Response, String> {
+    if response.status().is_success() {
+        Ok(response)
+    } else {
+        Err(api_error(response))
+    }
 }
 
-fn decode<T: DeserializeOwned>(mut response: Response) -> Result<T, String> {
-    ensure_success(&mut response)?;
-    response.json::<T>().map_err(|e| e.to_string())
+fn unit(response: Response) -> Result<(), String> {
+    success_response(response).map(|_| ())
+}
+
+fn decode<T: DeserializeOwned>(response: Response) -> Result<T, String> {
+    success_response(response)?.json::<T>().map_err(|e| e.to_string())
 }
