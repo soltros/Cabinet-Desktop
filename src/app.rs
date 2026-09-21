@@ -60,6 +60,7 @@ enum Message {
     Action(Result<String, String>, bool),
     ShareLink(Result<String, String>),
     Shares(Result<Vec<Share>, String>),
+    Thumbnail(String, Result<Option<Vec<u8>>, String>),
     Admin(Result<(AdminStats, Vec<AdminUser>, Vec<AdminShare>, String), String>),
 }
 
@@ -82,6 +83,8 @@ pub struct CabinetApp {
     status: String,
     dialog: Option<Dialog>,
     shares: Vec<Share>,
+    thumbnails: HashMap<String, egui::TextureHandle>,
+    thumbnail_pending: HashSet<String>,
     admin_stats: Option<AdminStats>,
     admin_users: Vec<AdminUser>,
     admin_shares: Vec<AdminShare>,
@@ -119,6 +122,8 @@ impl CabinetApp {
             status: String::new(),
             dialog: None,
             shares: Vec::new(),
+            thumbnails: HashMap::new(),
+            thumbnail_pending: HashSet::new(),
             admin_stats: None,
             admin_users: Vec::new(),
             admin_shares: Vec::new(),
@@ -196,6 +201,21 @@ impl CabinetApp {
         });
     }
 
+    fn load_thumbnail(&mut self, id: String) {
+        if self.thumbnails.contains_key(&id) || !self.thumbnail_pending.insert(id.clone()) {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            self.thumbnail_pending.remove(&id);
+            return;
+        };
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = client.thumbnail(&id);
+            let _ = tx.send(Message::Thumbnail(id, result));
+        });
+    }
+
     fn refresh_admin(&mut self) {
         let Some(client) = self.client.clone() else {
             return;
@@ -229,9 +249,11 @@ impl CabinetApp {
         });
     }
 
-    fn process_messages(&mut self) {
+    fn process_messages(&mut self, ctx: &egui::Context) {
         while let Ok(message) = self.rx.try_recv() {
-            self.busy = self.busy.saturating_sub(1);
+            if !matches!(message, Message::Thumbnail(_, _)) {
+                self.busy = self.busy.saturating_sub(1);
+            }
             match message {
                 Message::Restore(result) | Message::Login(result) => match result {
                     Ok((client, user)) => {
@@ -258,6 +280,10 @@ impl CabinetApp {
                 },
                 Message::Refresh(result) => match result {
                     Ok((files, folders, user)) => {
+                        let live_ids: HashSet<String> =
+                            files.iter().map(|file| file.id.clone()).collect();
+                        self.thumbnails.retain(|id, _| live_ids.contains(id));
+                        self.thumbnail_pending.retain(|id| live_ids.contains(id));
                         self.files = files;
                         self.folders = folders;
                         self.user = Some(user);
@@ -286,6 +312,23 @@ impl CabinetApp {
                     Ok(shares) => self.shares = shares,
                     Err(error) => self.handle_error(error),
                 },
+                Message::Thumbnail(id, result) => {
+                    self.thumbnail_pending.remove(&id);
+                    if let Ok(Some(bytes)) = result {
+                        if let Ok(decoded) = image::load_from_memory(&bytes) {
+                            let rgba = decoded.to_rgba8();
+                            let size = [rgba.width() as usize, rgba.height() as usize];
+                            let color =
+                                egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                            let texture = ctx.load_texture(
+                                format!("cabinet-thumbnail-{id}"),
+                                color,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            self.thumbnails.insert(id, texture);
+                        }
+                    }
+                }
                 Message::Admin(result) => match result {
                     Ok((stats, users, shares, logs)) => {
                         self.admin_stats = Some(stats);
@@ -633,13 +676,28 @@ impl CabinetApp {
             } else {
                 ui.horizontal_wrapped(|ui| {
                     for folder in folders {
-                        if card(ui, "📁", &folder.name, "Folder", false).clicked() {
+                        if card(ui, "📁", &folder.name, "Folder", false, None).clicked() {
                             self.current_folder = Some(folder.id);
                         }
                     }
                     for file in files {
                         let selected = self.selected_file.as_deref() == Some(file.id.as_str());
-                        if card(ui, "📄", &file.name, &format_bytes(file.size), selected).clicked()
+                        if file.thumbnail.is_some()
+                            && !self.thumbnails.contains_key(&file.id)
+                            && !self.thumbnail_pending.contains(&file.id)
+                        {
+                            self.load_thumbnail(file.id.clone());
+                        }
+                        let texture = self.thumbnails.get(&file.id);
+                        if card(
+                            ui,
+                            "📄",
+                            &file.name,
+                            &format_bytes(file.size),
+                            selected,
+                            texture,
+                        )
+                        .clicked()
                         {
                             self.selected_file = Some(file.id.clone());
                         }
@@ -1099,7 +1157,7 @@ impl CabinetApp {
 
 impl eframe::App for CabinetApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.process_messages();
+        self.process_messages(ctx);
 
         if let Some(text) = self.pending_clipboard.take() {
             ctx.copy_text(text);
@@ -1227,7 +1285,14 @@ fn nav_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
     ui.add_sized([180.0, 36.0], egui::Button::new(label).selected(active))
 }
 
-fn card(ui: &mut egui::Ui, icon: &str, name: &str, meta: &str, selected: bool) -> egui::Response {
+fn card(
+    ui: &mut egui::Ui,
+    icon: &str,
+    name: &str,
+    meta: &str,
+    selected: bool,
+    texture: Option<&egui::TextureHandle>,
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(165.0, 190.0), Sense::click());
     let fill = if selected {
         Color32::from_rgb(232, 241, 255)
@@ -1241,13 +1306,26 @@ fn card(ui: &mut egui::Ui, icon: &str, name: &str, meta: &str, selected: bool) -
         Stroke::new(1.0, Color32::from_rgb(224, 229, 238)),
         egui::StrokeKind::Inside,
     );
-    ui.painter().text(
-        rect.center_top() + Vec2::new(0.0, 48.0),
-        egui::Align2::CENTER_CENTER,
-        icon,
-        egui::FontId::proportional(42.0),
-        Color32::from_rgb(92, 132, 190),
+    let preview_rect = egui::Rect::from_min_max(
+        rect.min + Vec2::new(8.0, 8.0),
+        egui::pos2(rect.max.x - 8.0, rect.min.y + 120.0),
     );
+    if let Some(texture) = texture {
+        ui.painter().image(
+            texture.id(),
+            preview_rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    } else {
+        ui.painter().text(
+            rect.center_top() + Vec2::new(0.0, 48.0),
+            egui::Align2::CENTER_CENTER,
+            icon,
+            egui::FontId::proportional(42.0),
+            Color32::from_rgb(92, 132, 190),
+        );
+    }
     let title = truncate(name, 22);
     ui.painter().text(
         rect.left_bottom() + Vec2::new(12.0, -38.0),
