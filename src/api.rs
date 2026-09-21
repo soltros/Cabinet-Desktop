@@ -345,14 +345,20 @@ impl CabinetClient {
         )
     }
 
-    pub fn create_public_share(&self, file_id: &str) -> Result<String, String> {
+    pub fn create_public_share(
+        &self,
+        file_id: &str,
+        password: Option<&str>,
+        expires_at: Option<&str>,
+        download_limit: Option<i64>,
+    ) -> Result<String, String> {
         let response = self
             .request(Method::POST, "/api/shares")
             .json(&json!({
                 "fileId": file_id,
-                "password": Value::Null,
-                "expiresAt": Value::Null,
-                "downloadLimit": Value::Null
+                "password": password,
+                "expiresAt": expires_at,
+                "downloadLimit": download_limit
             }))
             .send()
             .map_err(|e| e.to_string())?;
