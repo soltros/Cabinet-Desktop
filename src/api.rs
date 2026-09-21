@@ -251,7 +251,6 @@ impl CabinetClient {
         Ok(decode::<FolderResponse>(response)?.folder)
     }
 
-    #[allow(dead_code)]
     pub fn delete_folder(&self, id: &str) -> Result<(), String> {
         unit(
             self.request(Method::DELETE, &format!("/api/folders/{id}"))
@@ -302,7 +301,6 @@ impl CabinetClient {
         Ok(decode::<FileResponse>(response)?.file)
     }
 
-    #[allow(dead_code)]
     pub fn move_file(&self, id: &str, parent_id: Option<&str>) -> Result<CabinetFile, String> {
         let response = self
             .request(Method::PATCH, &format!("/api/files/{id}"))
@@ -385,6 +383,59 @@ impl CabinetClient {
                 .map_err(|e| e.to_string())?,
         )?
         .shares)
+    }
+
+    pub fn admin_create_user(&self, username: &str, password: &str, quota: i64) -> Result<(), String> {
+        unit(
+            self.request(Method::POST, "/api/admin/users")
+                .json(&json!({ "username": username, "password": password, "quota": quota }))
+                .send()
+                .map_err(|e| e.to_string())?,
+        )
+    }
+
+    pub fn admin_update_user(
+        &self,
+        id: &str,
+        password: Option<&str>,
+        quota: Option<i64>,
+    ) -> Result<(), String> {
+        unit(
+            self.request(Method::PATCH, &format!("/api/admin/users/{id}"))
+                .json(&json!({ "password": password, "quota": quota }))
+                .send()
+                .map_err(|e| e.to_string())?,
+        )
+    }
+
+    pub fn admin_delete_user(&self, id: &str) -> Result<(), String> {
+        unit(
+            self.request(Method::DELETE, &format!("/api/admin/users/{id}"))
+                .send()
+                .map_err(|e| e.to_string())?,
+        )
+    }
+
+    pub fn admin_revoke_share(&self, id: &str) -> Result<(), String> {
+        unit(
+            self.request(Method::DELETE, &format!("/api/admin/shares/{id}"))
+                .send()
+                .map_err(|e| e.to_string())?,
+        )
+    }
+
+    pub fn admin_scrub(&self) -> Result<i64, String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ScrubResponse {
+            removed_count: i64,
+        }
+
+        let response = self
+            .request(Method::POST, "/api/admin/scrub")
+            .send()
+            .map_err(|e| e.to_string())?;
+        Ok(decode::<ScrubResponse>(response)?.removed_count)
     }
 
     pub fn admin_logs(&self) -> Result<String, String> {
