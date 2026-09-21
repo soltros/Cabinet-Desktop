@@ -34,9 +34,11 @@ enum ViewMode {
 
 enum Dialog {
     CreateFolder { name: String },
-    Rename { id: String, current: String, value: String },
+    Rename { id: String, value: String },
     ShareUser { id: String, username: String },
 }
+
+type DialogAction = Box<dyn FnOnce(&mut CabinetApp)>;
 
 enum Message {
     Restore(Result<(CabinetClient, User), String>),
@@ -483,7 +485,7 @@ impl CabinetApp {
             ui.add_space(18.0);
             if ui.button("Download").clicked() { self.download_selected(); }
             if ui.button("Rename").clicked() {
-                self.dialog = Some(Dialog::Rename { id: file.id.clone(), current: file.name.clone(), value: file.name.clone() });
+                self.dialog = Some(Dialog::Rename { id: file.id.clone(), value: file.name.clone() });
             }
             if ui.button("Copy public link").clicked() {
                 let tx = self.tx.clone();
@@ -574,7 +576,7 @@ impl CabinetApp {
 
     fn ui_dialog(&mut self, ctx: &egui::Context) {
         let mut close = false;
-        let mut action: Option<Box<dyn FnOnce(&mut Self)>> = None;
+        let mut action: Option<DialogAction> = None;
         if let Some(dialog) = &mut self.dialog {
             egui::Window::new(match dialog {
                 Dialog::CreateFolder { .. } => "New folder",
@@ -597,7 +599,7 @@ impl CabinetApp {
                             close = true;
                         }
                     }
-                    Dialog::Rename { id, current: _, value } => {
+                    Dialog::Rename { id, value } => {
                         ui.label("File name");
                         ui.text_edit_singleline(value);
                         let id = id.clone();
