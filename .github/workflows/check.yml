@@ -1,5 +1,8 @@
 name: Rust checks
 
+permissions:
+  contents: write
+
 on:
   push:
     branches: [main, "feat/**", "fix/**"]
@@ -19,6 +22,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - name: Generate Cargo.lock
+        if: runner.os == 'Linux'
+        run: cargo generate-lockfile
+
+      - name: Commit Cargo.lock
+        if: runner.os == 'Linux' && github.event_name == 'push'
+        shell: bash
+        run: |
+          if git diff --quiet -- Cargo.lock && git ls-files --error-unmatch Cargo.lock >/dev/null 2>&1; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore: lock Rust dependencies"
+          git push origin HEAD:${GITHUB_REF_NAME}
 
       - name: Linux desktop dependencies
         if: runner.os == 'Linux'
