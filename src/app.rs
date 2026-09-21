@@ -53,11 +53,19 @@ enum Dialog {
 
 type DialogAction = Box<dyn FnOnce(&mut CabinetApp)>;
 
+#[derive(Clone, Copy)]
+enum RefreshAfter {
+    None,
+    Files,
+    Shares,
+    Admin,
+}
+
 enum Message {
     Restore(Result<(CabinetClient, User), String>),
     Login(Result<(CabinetClient, User), String>),
     Refresh(Result<(Vec<CabinetFile>, Vec<Folder>, User), String>),
-    Action(Result<String, String>, bool),
+    Action(Result<String, String>, RefreshAfter),
     ShareLink(Result<String, String>),
     Shares(Result<Vec<Share>, String>),
     Thumbnail(String, Result<Option<Vec<u8>>, String>),
@@ -234,7 +242,7 @@ impl CabinetApp {
         });
     }
 
-    fn run_action<F>(&mut self, refresh: bool, f: F)
+    fn run_action<F>(&mut self, refresh: RefreshAfter, f: F)
     where
         F: FnOnce(CabinetClient) -> Result<String, String> + Send + 'static,
     {
@@ -294,8 +302,11 @@ impl CabinetApp {
                 Message::Action(result, refresh) => match result {
                     Ok(message) => {
                         self.status = message;
-                        if refresh {
-                            self.refresh();
+                        match refresh {
+                            RefreshAfter::None => {}
+                            RefreshAfter::Files => self.refresh(),
+                            RefreshAfter::Shares => self.refresh_shares(),
+                            RefreshAfter::Admin => self.refresh_admin(),
                         }
                     }
                     Err(error) => self.handle_error(error),
@@ -372,7 +383,7 @@ impl CabinetApp {
             return;
         };
         let parent = self.current_folder.clone();
-        self.run_action(true, move |client| {
+        self.run_action(RefreshAfter::Files, move |client| {
             let count = paths.len();
             for path in paths {
                 client.upload_file(&path, parent.as_deref())?;
@@ -393,7 +404,7 @@ impl CabinetApp {
         let Some(destination) = destination else {
             return;
         };
-        self.run_action(false, move |client| {
+        self.run_action(RefreshAfter::None, move |client| {
             client.download_file(&file.id, &destination)?;
             Ok(format!("Downloaded {}", file.name))
         });
@@ -630,7 +641,7 @@ impl CabinetApp {
                                 .folder_map()
                                 .get(folder_id.as_str())
                                 .and_then(|folder| folder.parent_id.clone());
-                            self.run_action(true, move |client| {
+                            self.run_action(RefreshAfter::Files, move |client| {
                                 client.delete_folder(&folder_id)?;
                                 Ok("Folder deleted".into())
                             });
@@ -767,7 +778,7 @@ impl CabinetApp {
                 {
                     let id = file.id.clone();
                     self.selected_file = None;
-                    self.run_action(true, move |client| {
+                    self.run_action(RefreshAfter::Files, move |client| {
                         client.delete_file(&id)?;
                         Ok("File deleted".into())
                     });
@@ -784,11 +795,10 @@ impl CabinetApp {
                         self.refresh_admin();
                     }
                     if ui.button("Scrub database").clicked() {
-                        self.run_action(false, move |client| {
+                        self.run_action(RefreshAfter::Admin, move |client| {
                             let removed = client.admin_scrub()?;
                             Ok(format!("Database scrub complete: {removed} missing file record(s) removed"))
                         });
-                        self.refresh_admin();
                     }
                     if ui.button("Create user").clicked() {
                         self.dialog = Some(Dialog::AdminCreateUser {
@@ -839,11 +849,10 @@ impl CabinetApp {
                         }
                         if user.role != "admin" && ui.button("Delete").clicked() {
                             let id = user.id.clone();
-                            self.run_action(false, move |client| {
+                            self.run_action(RefreshAfter::Admin, move |client| {
                                 client.admin_delete_user(&id)?;
                                 Ok("User deleted".into())
                             });
-                            self.refresh_admin();
                         }
                     });
                     ui.end_row();
@@ -866,11 +875,10 @@ impl CabinetApp {
                         ui.label(share.downloads.to_string());
                         if ui.button("Revoke").clicked() {
                             let id = share.id.clone();
-                            self.run_action(false, move |client| {
+                            self.run_action(RefreshAfter::Admin, move |client| {
                                 client.admin_revoke_share(&id)?;
                                 Ok("Share revoked".into())
                             });
-                            self.refresh_admin();
                         }
                         ui.end_row();
                     }
@@ -940,17 +948,9 @@ impl CabinetApp {
                         );
                         if ui.button("Revoke").clicked() {
                             let id = share.id.clone();
-                            let tx = self.tx.clone();
-                            let Some(client) = self.client.clone() else {
-                                continue;
-                            };
-                            self.busy += 1;
-                            thread::spawn(move || {
-                                let result = client
-                                    .revoke_share(&id)
-                                    .map(|_| "Share revoked".to_string());
-                                let _ = tx.send(Message::Action(result, false));
-                                let _ = tx.send(Message::Shares(client.list_shares()));
+                            self.run_action(RefreshAfter::Shares, move |client| {
+                                client.revoke_share(&id)?;
+                                Ok("Share revoked".to_string())
                             });
                         }
                         ui.end_row();
@@ -999,7 +999,7 @@ impl CabinetApp {
                         if ui.button("Create").clicked() && !value.is_empty() {
                             action = Some(Box::new(move |app| {
                                 let parent = app.current_folder.clone();
-                                app.run_action(true, move |client| {
+                                app.run_action(RefreshAfter::Files, move |client| {
                                     client.create_folder(&value, parent.as_deref())?;
                                     Ok("Folder created".into())
                                 });
@@ -1014,7 +1014,7 @@ impl CabinetApp {
                         let value = value.trim().to_string();
                         if ui.button("Rename").clicked() && !value.is_empty() {
                             action = Some(Box::new(move |app| {
-                                app.run_action(true, move |client| {
+                                app.run_action(RefreshAfter::Files, move |client| {
                                     client.rename_file(&id, &value)?;
                                     Ok("File renamed".into())
                                 });
@@ -1050,7 +1050,7 @@ impl CabinetApp {
                         let target = target.clone();
                         if ui.button("Move").clicked() {
                             action = Some(Box::new(move |app| {
-                                app.run_action(true, move |client| {
+                                app.run_action(RefreshAfter::Files, move |client| {
                                     client.move_file(&id, target.as_deref())?;
                                     Ok("File moved".into())
                                 });
@@ -1065,7 +1065,7 @@ impl CabinetApp {
                         let username = username.trim().to_string();
                         if ui.button("Share").clicked() && !username.is_empty() {
                             action = Some(Box::new(move |app| {
-                                app.run_action(false, move |client| {
+                                app.run_action(RefreshAfter::None, move |client| {
                                     client.share_with_user(&id, &username)?;
                                     Ok("File shared".into())
                                 });
@@ -1094,11 +1094,10 @@ impl CabinetApp {
                         if create_clicked && !username.is_empty() && password.len() >= 12 {
                             if let Some(quota) = quota {
                                 action = Some(Box::new(move |app| {
-                                    app.run_action(false, move |client| {
+                                    app.run_action(RefreshAfter::Admin, move |client| {
                                         client.admin_create_user(&username, &password, quota)?;
                                         Ok("User created".into())
                                     });
-                                    app.refresh_admin();
                                 }));
                                 close = true;
                             }
@@ -1127,7 +1126,7 @@ impl CabinetApp {
 
                         if ui.button("Save").clicked() && quota.is_some() {
                             action = Some(Box::new(move |app| {
-                                app.run_action(false, move |client| {
+                                app.run_action(RefreshAfter::Admin, move |client| {
                                     client.admin_update_user(
                                         &id,
                                         password.as_deref(),
@@ -1135,7 +1134,6 @@ impl CabinetApp {
                                     )?;
                                     Ok("User updated".into())
                                 });
-                                app.refresh_admin();
                             }));
                             close = true;
                         }
