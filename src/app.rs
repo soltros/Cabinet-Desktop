@@ -555,8 +555,8 @@ impl CabinetApp {
         });
     }
 
-    fn ui_settings(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn ui_settings(&mut self, root: &mut egui::Ui) {
+        egui::CentralPanel::default().show(root, |ui| {
             ui.heading("Settings");
             ui.add_space(16.0);
             ui.group(|ui| {
