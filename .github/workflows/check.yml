@@ -3,6 +3,10 @@ name: Rust checks
 permissions:
   contents: write
 
+concurrency:
+  group: rust-checks-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: [main, "feat/**", "fix/**"]
