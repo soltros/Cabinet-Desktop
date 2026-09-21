@@ -78,6 +78,28 @@ enum RefreshAfter {
     Admin,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransferKind {
+    Upload,
+    Download,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransferStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+struct TransferState {
+    id: u64,
+    name: String,
+    kind: TransferKind,
+    status: TransferStatus,
+    transferred: u64,
+    total: u64,
+}
+
 enum Message {
     Restore(Result<(CabinetClient, User), String>),
     Login(Result<(CabinetClient, User), String>),
@@ -86,6 +108,16 @@ enum Message {
     ShareLink(Result<String, String>),
     Shares(Result<Vec<Share>, String>),
     Thumbnail(String, Result<Option<Vec<u8>>, String>),
+    TransferProgress {
+        id: u64,
+        transferred: u64,
+        total: u64,
+    },
+    TransferFinished {
+        id: u64,
+        result: Result<String, String>,
+        refresh: RefreshAfter,
+    },
     Admin(Result<(AdminStats, Vec<AdminUser>, Vec<AdminShare>, String), String>),
 }
 
@@ -110,6 +142,8 @@ pub struct CabinetApp {
     shares: Vec<Share>,
     thumbnails: HashMap<String, egui::TextureHandle>,
     thumbnail_pending: HashSet<String>,
+    transfers: Vec<TransferState>,
+    next_transfer_id: u64,
     admin_stats: Option<AdminStats>,
     admin_users: Vec<AdminUser>,
     admin_shares: Vec<AdminShare>,
@@ -149,6 +183,8 @@ impl CabinetApp {
             shares: Vec::new(),
             thumbnails: HashMap::new(),
             thumbnail_pending: HashSet::new(),
+            transfers: Vec::new(),
+            next_transfer_id: 1,
             admin_stats: None,
             admin_users: Vec::new(),
             admin_shares: Vec::new(),
@@ -299,7 +335,10 @@ impl CabinetApp {
 
     fn process_messages(&mut self, ctx: &egui::Context) {
         while let Ok(message) = self.rx.try_recv() {
-            if !matches!(message, Message::Thumbnail(_, _)) {
+            if !matches!(
+                message,
+                Message::Thumbnail(_, _) | Message::TransferProgress { .. }
+            ) {
                 self.busy = self.busy.saturating_sub(1);
             }
             match message {
@@ -380,6 +419,54 @@ impl CabinetApp {
                         }
                     }
                 }
+                Message::TransferProgress {
+                    id,
+                    transferred,
+                    total,
+                } => {
+                    if let Some(transfer) =
+                        self.transfers.iter_mut().find(|transfer| transfer.id == id)
+                    {
+                        transfer.transferred = transferred;
+                        transfer.total = total;
+                    }
+                }
+                Message::TransferFinished {
+                    id,
+                    result,
+                    refresh,
+                } => {
+                    if let Some(transfer) =
+                        self.transfers.iter_mut().find(|transfer| transfer.id == id)
+                    {
+                        transfer.status = if result.is_ok() {
+                            TransferStatus::Completed
+                        } else {
+                            TransferStatus::Failed
+                        };
+                        if transfer.total > 0 && result.is_ok() {
+                            transfer.transferred = transfer.total;
+                        }
+                    }
+
+                    match result {
+                        Ok(message) => {
+                            self.status = message;
+                            let batch_done = !self.transfers.iter().any(|transfer| {
+                                transfer.kind == TransferKind::Upload
+                                    && transfer.status == TransferStatus::Running
+                            });
+                            match refresh {
+                                RefreshAfter::Files if batch_done => self.refresh(),
+                                RefreshAfter::Files => {}
+                                RefreshAfter::Shares => self.refresh_shares(),
+                                RefreshAfter::Admin => self.refresh_admin(),
+                                RefreshAfter::None => {}
+                            }
+                        }
+                        Err(error) => self.handle_error(error),
+                    }
+                }
                 Message::Admin(result) => match result {
                     Ok((stats, users, shares, logs)) => {
                         self.admin_stats = Some(stats);
@@ -422,18 +509,56 @@ impl CabinetApp {
         let Some(paths) = files else {
             return;
         };
+        let Some(client) = self.client.clone() else {
+            return;
+        };
         let parent = self.current_folder.clone();
-        self.run_action(RefreshAfter::Files, move |client| {
-            let count = paths.len();
-            for path in paths {
-                client.upload_file(&path, parent.as_deref())?;
-            }
-            Ok(if count == 1 {
-                "Upload complete".into()
-            } else {
-                format!("{count} files uploaded")
-            })
-        });
+
+        for path in paths {
+            let id = self.next_transfer_id;
+            self.next_transfer_id = self.next_transfer_id.saturating_add(1);
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("Upload")
+                .to_string();
+
+            self.transfers.push(TransferState {
+                id,
+                name: name.clone(),
+                kind: TransferKind::Upload,
+                status: TransferStatus::Running,
+                transferred: 0,
+                total: std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
+            });
+            self.busy += 1;
+
+            let tx = self.tx.clone();
+            let progress_tx = tx.clone();
+            let client = client.clone();
+            let parent = parent.clone();
+            thread::spawn(move || {
+                let result = client
+                    .upload_file_with_progress(
+                        &path,
+                        parent.as_deref(),
+                        move |transferred, total| {
+                            let _ = progress_tx.send(Message::TransferProgress {
+                                id,
+                                transferred,
+                                total,
+                            });
+                        },
+                    )
+                    .map(|file| format!("Uploaded {}", file.name));
+
+                let _ = tx.send(Message::TransferFinished {
+                    id,
+                    result,
+                    refresh: RefreshAfter::Files,
+                });
+            });
+        }
     }
 
     fn download_selected(&mut self) {
@@ -444,9 +569,46 @@ impl CabinetApp {
         let Some(destination) = destination else {
             return;
         };
-        self.run_action(RefreshAfter::None, move |client| {
-            client.download_file(&file.id, &destination)?;
-            Ok(format!("Downloaded {}", file.name))
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+
+        let id = self.next_transfer_id;
+        self.next_transfer_id = self.next_transfer_id.saturating_add(1);
+        self.transfers.push(TransferState {
+            id,
+            name: file.name.clone(),
+            kind: TransferKind::Download,
+            status: TransferStatus::Running,
+            transferred: 0,
+            total: file.size.max(0) as u64,
+        });
+        self.busy += 1;
+
+        let tx = self.tx.clone();
+        let progress_tx = tx.clone();
+        let file_id = file.id.clone();
+        let file_name = file.name.clone();
+        thread::spawn(move || {
+            let result = client
+                .download_file_with_progress(
+                    &file_id,
+                    &destination,
+                    move |transferred, total| {
+                        let _ = progress_tx.send(Message::TransferProgress {
+                            id,
+                            transferred,
+                            total,
+                        });
+                    },
+                )
+                .map(|_| format!("Downloaded {file_name}"));
+
+            let _ = tx.send(Message::TransferFinished {
+                id,
+                result,
+                refresh: RefreshAfter::None,
+            });
         });
     }
 
@@ -1008,6 +1170,71 @@ impl CabinetApp {
         });
     }
 
+    fn ui_transfers(&mut self, root: &mut egui::Ui) {
+        if self.transfers.is_empty() {
+            return;
+        }
+
+        let visible_count = self.transfers.len().min(4);
+        let height = 42.0 + visible_count as f32 * 44.0;
+        let mut clear_completed = false;
+
+        egui::Panel::bottom("transfers")
+            .exact_size(height)
+            .show(root, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("Transfers");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Clear completed").clicked() {
+                            clear_completed = true;
+                        }
+                    });
+                });
+
+                for transfer in self.transfers.iter().rev().take(4).rev() {
+                    let fraction = if transfer.total > 0 {
+                        (transfer.transferred as f32 / transfer.total as f32).clamp(0.0, 1.0)
+                    } else if transfer.status == TransferStatus::Completed {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    let verb = match transfer.kind {
+                        TransferKind::Upload => "Upload",
+                        TransferKind::Download => "Download",
+                    };
+                    let suffix = match transfer.status {
+                        TransferStatus::Running => {
+                            format!(
+                                "{} / {}",
+                                format_bytes(transfer.transferred as i64),
+                                if transfer.total > 0 {
+                                    format_bytes(transfer.total as i64)
+                                } else {
+                                    "Unknown".into()
+                                }
+                            )
+                        }
+                        TransferStatus::Completed => "Complete".into(),
+                        TransferStatus::Failed => "Failed".into(),
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{verb}: {}", truncate(&transfer.name, 34)));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(RichText::new(suffix).small().color(Color32::GRAY));
+                        });
+                    });
+                    ui.add(egui::ProgressBar::new(fraction).desired_width(f32::INFINITY));
+                }
+            });
+
+        if clear_completed {
+            self.transfers
+                .retain(|transfer| transfer.status == TransferStatus::Running);
+        }
+    }
+
     fn ui_settings(&mut self, root: &mut egui::Ui) {
         egui::CentralPanel::default().show(root, |ui| {
             ui.heading("Settings");
@@ -1313,6 +1540,7 @@ impl eframe::App for CabinetApp {
         }
 
         self.ui_sidebar(root);
+        self.ui_transfers(root);
 
         if self.busy > 0 {
             egui::Panel::bottom("status")
