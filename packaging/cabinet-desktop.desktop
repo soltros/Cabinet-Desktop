@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Cabinet
+Comment=Desktop client for the Cabinet self-hosted file locker
+Exec=cabinet-desktop
+Icon=cabinet-desktop
+Terminal=false
+Categories=Utility;Network;
+StartupNotify=true
