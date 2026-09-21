@@ -26,11 +26,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y             libgtk-3-dev             libayatana-appindicator3-dev             libxdo-dev             libxkbcommon-dev             libdbus-1-dev
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
       - name: Cargo check
         run: cargo check --all-targets
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
