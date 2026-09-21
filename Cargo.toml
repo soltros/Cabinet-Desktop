@@ -27,8 +27,17 @@ strip = true
 [package.metadata.packager]
 product-name = "Cabinet"
 identifier = "info.soltros.cabinet.desktop"
-formats = ["app", "dmg", "nsis", "wix", "deb", "appimage", "pacman"]
 homepage = "https://github.com/soltros/Cabinet-Desktop"
 license-file = "LICENSE"
 category = "Utility"
 description = "Native Rust desktop client for the Cabinet self-hosted file locker"
+long-description = "A pure-Rust desktop client for self-hosted Cabinet servers, with secure credential storage, file and folder management, sharing, administration, and system tray persistence."
+before-packaging-command = "cargo build --release"
+out-dir = "dist"
+
+[package.metadata.generate-rpm]
+assets = [
+  { source = "target/release/cabinet-desktop", dest = "/usr/bin/cabinet-desktop", mode = "755" },
+  { source = "packaging/cabinet-desktop.desktop", dest = "/usr/share/applications/cabinet-desktop.desktop", mode = "644" },
+  { source = "packaging/cabinet-desktop.svg", dest = "/usr/share/icons/hicolor/scalable/apps/cabinet-desktop.svg", mode = "644" }
+]
