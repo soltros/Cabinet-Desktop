@@ -49,6 +49,12 @@ enum Dialog {
         id: String,
         username: String,
     },
+    PublicShare {
+        id: String,
+        password: String,
+        expires_hours: String,
+        download_limit: String,
+    },
     AdminCreateUser {
         username: String,
         password: String,
@@ -206,6 +212,29 @@ impl CabinetApp {
                     .and_then(|folders| client.me().map(|user| (files, folders, user)))
             });
             let _ = tx.send(Message::Refresh(result));
+        });
+    }
+
+    fn create_public_share(
+        &mut self,
+        id: String,
+        password: Option<String>,
+        expires_at: Option<String>,
+        download_limit: Option<i64>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.busy += 1;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = client.create_public_share(
+                &id,
+                password.as_deref(),
+                expires_at.as_deref(),
+                download_limit,
+            );
+            let _ = tx.send(Message::ShareLink(result));
         });
     }
 
@@ -762,16 +791,12 @@ impl CabinetApp {
                         target: file.parent_id.clone(),
                     });
                 }
-                if ui.button("Copy public link").clicked() {
-                    let tx = self.tx.clone();
-                    let Some(client) = self.client.clone() else {
-                        return;
-                    };
-                    let id = file.id.clone();
-                    self.busy += 1;
-                    thread::spawn(move || {
-                        let result = client.create_public_share(&id);
-                        let _ = tx.send(Message::ShareLink(result));
+                if ui.button("Create public link").clicked() {
+                    self.dialog = Some(Dialog::PublicShare {
+                        id: file.id.clone(),
+                        password: String::new(),
+                        expires_hours: String::new(),
+                        download_limit: String::new(),
                     });
                 }
                 if ui.button("Share with Cabinet user").clicked() {
@@ -987,6 +1012,7 @@ impl CabinetApp {
                 Dialog::Rename { .. } => "Rename file",
                 Dialog::Move { .. } => "Move file",
                 Dialog::ShareUser { .. } => "Share with user",
+                Dialog::PublicShare { .. } => "Create public link",
                 Dialog::AdminCreateUser { .. } => "Create user",
                 Dialog::AdminEditUser { .. } => "Edit user",
             })
@@ -1071,6 +1097,86 @@ impl CabinetApp {
                                     client.share_with_user(&id, &username)?;
                                     Ok("File shared".into())
                                 });
+                            }));
+                            close = true;
+                        }
+                    }
+                    Dialog::PublicShare {
+                        id,
+                        password,
+                        expires_hours,
+                        download_limit,
+                    } => {
+                        ui.label("Password (optional)");
+                        ui.add(egui::TextEdit::singleline(password).password(true));
+
+                        ui.label("Expires in hours (optional)");
+                        ui.text_edit_singleline(expires_hours);
+
+                        ui.label("Download limit (optional)");
+                        ui.text_edit_singleline(download_limit);
+
+                        let expires_hours_value = if expires_hours.trim().is_empty() {
+                            None
+                        } else {
+                            expires_hours
+                                .trim()
+                                .parse::<i64>()
+                                .ok()
+                                .filter(|value| *value > 0)
+                        };
+                        let expires_valid =
+                            expires_hours.trim().is_empty() || expires_hours_value.is_some();
+
+                        let download_limit_value = if download_limit.trim().is_empty() {
+                            None
+                        } else {
+                            download_limit
+                                .trim()
+                                .parse::<i64>()
+                                .ok()
+                                .filter(|value| *value > 0)
+                        };
+                        let download_limit_valid =
+                            download_limit.trim().is_empty() || download_limit_value.is_some();
+
+                        if !expires_valid {
+                            ui.label(
+                                RichText::new("Expiration must be a positive number of hours.")
+                                    .color(Color32::from_rgb(190, 55, 55)),
+                            );
+                        }
+                        if !download_limit_valid {
+                            ui.label(
+                                RichText::new("Download limit must be a positive integer.")
+                                    .color(Color32::from_rgb(190, 55, 55)),
+                            );
+                        }
+
+                        let id = id.clone();
+                        let password = if password.is_empty() {
+                            None
+                        } else {
+                            Some(password.clone())
+                        };
+                        let expires_at = expires_hours_value.map(|hours| {
+                            (chrono::Utc::now() + chrono::Duration::hours(hours)).to_rfc3339()
+                        });
+
+                        if ui
+                            .add_enabled(
+                                expires_valid && download_limit_valid,
+                                egui::Button::new("Create and copy link"),
+                            )
+                            .clicked()
+                        {
+                            action = Some(Box::new(move |app| {
+                                app.create_public_share(
+                                    id,
+                                    password,
+                                    expires_at,
+                                    download_limit_value,
+                                );
                             }));
                             close = true;
                         }
