@@ -50,7 +50,7 @@ The Cabinet API token is stored separately in the operating system credential st
 
 - file listing
 - folder listing
-- grid view
+- grid view with API-backed thumbnails
 - list view
 - search
 - multi-file upload
