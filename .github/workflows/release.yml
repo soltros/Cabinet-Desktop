@@ -28,6 +28,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cabinet-desktop-${{ runner.os }}
+
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
