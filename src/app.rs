@@ -42,8 +42,9 @@ enum Dialog {
 enum Message {
     Restore(Result<(CabinetClient, User), String>),
     Login(Result<(CabinetClient, User), String>),
-    Refresh(Result<(Vec<CabinetFile>, Vec<Folder>), String>),
+    Refresh(Result<(Vec<CabinetFile>, Vec<Folder>, User), String>),
     Action(Result<String, String>, bool),
+    ShareLink(Result<String, String>),
     Admin(Result<(AdminStats, Vec<AdminUser>, Vec<AdminShare>, String), String>),
 }
 
@@ -70,6 +71,7 @@ pub struct CabinetApp {
     admin_shares: Vec<AdminShare>,
     admin_logs: String,
     allow_quit: bool,
+    pending_clipboard: Option<String>,
     quit_requested: Arc<AtomicBool>,
     _tray: Option<TrayIcon>,
 }
@@ -105,6 +107,7 @@ impl CabinetApp {
             admin_shares: Vec::new(),
             admin_logs: String::new(),
             allow_quit: false,
+            pending_clipboard: None,
             quit_requested,
             _tray: tray,
         };
@@ -146,7 +149,9 @@ impl CabinetApp {
         let tx = self.tx.clone();
         thread::spawn(move || {
             let result = client.list_files().and_then(|files| {
-                client.list_folders().map(|folders| (files, folders))
+                client.list_folders().and_then(|folders| {
+                    client.me().map(|user| (files, folders, user))
+                })
             });
             let _ = tx.send(Message::Refresh(result));
         });
@@ -209,11 +214,11 @@ impl CabinetApp {
                     }
                 },
                 Message::Refresh(result) => match result {
-                    Ok((files, folders)) => {
+                    Ok((files, folders, user)) => {
                         self.files = files;
                         self.folders = folders;
+                        self.user = Some(user);
                         self.status.clear();
-                        self.refresh_user();
                     }
                     Err(error) => self.handle_error(error),
                 },
@@ -221,6 +226,13 @@ impl CabinetApp {
                     Ok(message) => {
                         self.status = message;
                         if refresh { self.refresh(); }
+                    }
+                    Err(error) => self.handle_error(error),
+                },
+                Message::ShareLink(result) => match result {
+                    Ok(url) => {
+                        self.pending_clipboard = Some(url);
+                        self.status = "Public link copied to clipboard".into();
                     }
                     Err(error) => self.handle_error(error),
                 },
@@ -235,16 +247,6 @@ impl CabinetApp {
                 },
             }
         }
-    }
-
-    fn refresh_user(&mut self) {
-        let Some(client) = self.client.clone() else { return; };
-        let tx = self.tx.clone();
-        thread::spawn(move || {
-            if let Ok(user) = client.me() {
-                let _ = tx.send(Message::Restore(Ok((client, user))));
-            }
-        });
     }
 
     fn handle_error(&mut self, error: String) {
@@ -491,8 +493,8 @@ impl CabinetApp {
                 let id = file.id.clone();
                 self.busy += 1;
                 thread::spawn(move || {
-                    let result = client.create_public_share(&id).map(|url| format!("SHARE:{url}"));
-                    let _ = tx.send(Message::Action(result, false));
+                    let result = client.create_public_share(&id);
+                    let _ = tx.send(Message::ShareLink(result));
                 });
             }
             if ui.button("Share with Cabinet user").clicked() {
@@ -639,6 +641,9 @@ impl CabinetApp {
 impl eframe::App for CabinetApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_messages();
+        if let Some(text) = self.pending_clipboard.take() {
+            ctx.copy_text(text);
+        }
         ctx.request_repaint_after(Duration::from_millis(120));
 
         if self.quit_requested.swap(false, Ordering::SeqCst) {
@@ -672,10 +677,6 @@ impl eframe::App for CabinetApp {
             });
         } else if !self.status.is_empty() {
             egui::TopBottomPanel::bottom("status").exact_height(26.0).show(ctx, |ui| {
-                if let Some(url) = self.status.strip_prefix("SHARE:") {
-                    ctx.copy_text(url.to_string());
-                    self.status = "Public link copied to clipboard".into();
-                }
                 ui.label(&self.status);
             });
         }
